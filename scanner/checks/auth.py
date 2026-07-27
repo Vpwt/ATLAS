@@ -19,7 +19,8 @@ def run(client, endpoints: list[Endpoint]) -> list[Finding]:
         # 1. Request with no Authorization header at all
         try:
             resp = client.request(ep.method, path, params=ep.params if ep.method == "GET" else None,
-                                   json_body=ep.body, auth_override="strip")
+                                       json_body=ep.body, auth_override="strip",
+                                       body_content_type=ep.body_content_type)
         except Exception as e:
             findings.append(Finding(
                 check="auth", severity=Severity.INFO, title="Request failed",
@@ -43,7 +44,8 @@ def run(client, endpoints: list[Endpoint]) -> list[Finding]:
         try:
             resp2 = client.request(ep.method, path, headers={"Authorization": "Bearer not-a-real-token"},
                                     params=ep.params if ep.method == "GET" else None,
-                                    json_body=ep.body, auth_override="keep")
+                                       json_body=ep.body, auth_override="keep",
+                                       body_content_type=ep.body_content_type)
             if resp2.status_code < 400:
                 findings.append(Finding(
                     check="auth", severity=Severity.CRITICAL,

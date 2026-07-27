@@ -23,7 +23,7 @@ from scanner.auth_flow import TokenRefresher
 from scanner.checks import (
     auth, bola, injection, rate_limit, headers, mass_assignment, jwt_checks,
     error_disclosure, bfla, ssrf, excessive_data_exposure, api_inventory, http_methods,
-    graphql, business_logic,
+    graphql, business_logic, unsafe_consumption,
 )
 
 ALL_CHECKS = {
@@ -42,6 +42,7 @@ ALL_CHECKS = {
     "api_inventory": api_inventory.run,
     "graphql": graphql.run,
     "business_logic": business_logic.run,
+    "unsafe_consumption": unsafe_consumption.run,
 }
 
 
@@ -126,17 +127,30 @@ def main():
             elif check_name == "jwt":
                 findings = fn(client, endpoints, jwt_sample_token=config.get("jwt_sample_token"),
                               jwt_public_key=config.get("jwt_public_key"),
-                              jwks_url=config.get("jwks_url"))
+                              jwks_url=config.get("jwks_url"),
+                              jwt_secret_wordlist=config.get("jwt_secret_wordlist"))
             elif check_name == "bfla":
                 findings = fn(client, endpoints,
                               low_priv_auth_header=config.get("low_priv_auth_header"),
-                              enable_verb_tampering=config.get("enable_verb_tampering", False))
+                              enable_verb_tampering=config.get("enable_verb_tampering", False),
+                              verb_tampering_mode=config.get("verb_tampering_mode", "safe"))
             elif check_name == "graphql":
                 findings = fn(client, endpoints, graphql_path=config.get("graphql_endpoint"))
             elif check_name == "business_logic":
-                findings = fn(client, config.get("workflows", []))
+                findings = fn(
+                    client,
+                    config.get("workflows", []),
+                    max_skip_combo_size=config.get("business_logic_max_skip_combo_size", 3),
+                    max_reorder_steps=config.get("business_logic_max_reorder_steps", 5),
+                    max_reorder_permutations=config.get("business_logic_max_reorder_permutations", 30),
+                )
             elif check_name == "ssrf":
-                findings = fn(client, endpoints, ssrf_callback_url=config.get("ssrf_callback_url"))
+                findings = fn(
+                    client,
+                    endpoints,
+                    ssrf_callback_url=config.get("ssrf_callback_url"),
+                    ssrf_callback_verify_url=config.get("ssrf_callback_verify_url"),
+                )
             else:
                 findings = fn(client, endpoints)
         except Exception as e:

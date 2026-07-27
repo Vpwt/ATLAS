@@ -51,6 +51,7 @@ class Endpoint:
     auth_required: bool = True         # should this endpoint require auth?
     params: dict = field(default_factory=dict)   # query params, {id} placeholders resolved here
     body: Optional[dict] = None        # JSON body template for POST/PUT/PATCH
+    body_content_type: str = "application/json"  # request body content type
     id_param: Optional[str] = None     # name of the path/query param that is an object ID (for BOLA tests)
     sample_ids: list = field(default_factory=list)  # ids the authenticated user IS allowed to access
     foreign_ids: list = field(default_factory=list)  # ids belonging to OTHER users/objects (for BOLA tests)

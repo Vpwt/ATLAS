@@ -17,7 +17,8 @@ def run(client, endpoints: list[Endpoint], burst_count: int = BURST_COUNT) -> li
         for _ in range(burst_count):
             try:
                 resp = client.request(ep.method, path, params=ep.params if ep.method == "GET" else None,
-                                       json_body=ep.body, auth_override="keep")
+                                       json_body=ep.body, auth_override="keep",
+                                       body_content_type=ep.body_content_type)
                 statuses.append(resp.status_code)
             except Exception:
                 statuses.append(None)
@@ -54,7 +55,8 @@ def _check_pagination_abuse(client, ep: Endpoint, label: str) -> list:
 
     try:
         resp = client.request(ep.method, path, params=test_params if ep.method == "GET" else None,
-                               json_body=ep.body, auth_override="keep")
+                               json_body=ep.body, auth_override="keep",
+                               body_content_type=ep.body_content_type)
     except Exception:
         return []
 

@@ -14,8 +14,10 @@ out-of-band probe: each SSRF-prone field gets a unique per-probe token
 appended to the callback URL, and if the target actually makes the outbound
 request, the listener will record it - this is the only way to confirm SSRF
 when the response gives no visible signal at all. Automatic confirmation
-(polling for the hit) is currently only implemented for webhook.site URLs;
-for other listeners, check your dashboard manually for the probe token.
+(polling for the hit) supports webhook.site out of the box, and can be made
+generic for any listener by setting `ssrf_callback_verify_url` to an endpoint
+that returns listener events text/JSON (the scanner checks whether the unique
+probe token appears in that response).
 """
 import re
 import time
@@ -67,7 +69,24 @@ def _poll_webhook_site(token: str, probe_token: str, timeout: float = 8.0) -> bo
         return False
 
 
-def run(client, endpoints: list[Endpoint], ssrf_callback_url: str = None) -> list[Finding]:
+def _poll_generic_verify_url(verify_url: str, probe_token: str, timeout: float = 8.0) -> bool:
+    """Generic OOB verifier: fetches a user-provided URL and treats any
+    response containing the probe token as a confirmed callback hit.
+
+    If verify_url contains '{probe}', it is replaced with the probe token.
+    """
+    if not verify_url:
+        return False
+    url = verify_url.replace("{probe}", probe_token)
+    try:
+        resp = requests.get(url, timeout=timeout)
+        return probe_token in (resp.text or "")
+    except Exception:
+        return False
+
+
+def run(client, endpoints: list[Endpoint], ssrf_callback_url: str = None,
+        ssrf_callback_verify_url: str = None) -> list[Finding]:
     findings = []
     webhook_token = _extract_webhook_site_token(ssrf_callback_url) if ssrf_callback_url else None
     oob_probes = []  # list of (probe_token, label, field, resp) awaiting confirmation
@@ -101,7 +120,8 @@ def run(client, endpoints: list[Endpoint], ssrf_callback_url: str = None) -> lis
                     resp = client.request(ep.method, path,
                                            params=test_params if ep.method == "GET" else None,
                                            json_body=test_body if ep.method in ("POST", "PUT", "PATCH") else None,
-                                           auth_override="keep")
+                                           auth_override="keep",
+                                           body_content_type=ep.body_content_type)
                 except Exception:
                     continue
                 elapsed = time.monotonic() - start
@@ -145,10 +165,15 @@ def run(client, endpoints: list[Endpoint], ssrf_callback_url: str = None) -> lis
                     ))
 
     if oob_probes:
-        if webhook_token:
+        if webhook_token or ssrf_callback_verify_url:
             time.sleep(2)  # give the target a moment to actually make the outbound call
         for probe_token, label, field, resp in oob_probes:
-            if webhook_token and _poll_webhook_site(webhook_token, probe_token):
+            confirmed = False
+            if webhook_token:
+                confirmed = _poll_webhook_site(webhook_token, probe_token)
+            if not confirmed and ssrf_callback_verify_url:
+                confirmed = _poll_generic_verify_url(ssrf_callback_verify_url, probe_token)
+            if confirmed:
                 findings.append(Finding(
                     check="ssrf", severity=Severity.CRITICAL,
                     title="Confirmed out-of-band SSRF (callback listener received the request)",
@@ -163,15 +188,16 @@ def run(client, endpoints: list[Endpoint], ssrf_callback_url: str = None) -> lis
                     owasp_ref="API7:2023 Server Side Request Forgery",
                     curl_repro=getattr(resp, "curl_repro", ""),
                 ))
-        if not webhook_token:
+        if not webhook_token and not ssrf_callback_verify_url:
             findings.append(Finding(
                 check="ssrf", severity=Severity.INFO,
                 title="Out-of-band SSRF probes sent - check your callback listener manually",
                 endpoint="-",
                 detail=(f"Unique callback URLs based on '{ssrf_callback_url}' were sent to every "
-                        "SSRF-prone parameter found. Automatic confirmation is only implemented "
-                        "for webhook.site URLs - for other listeners (interactsh, Burp "
-                        "Collaborator, RequestBin, etc.), check your dashboard for any inbound "
+                        "SSRF-prone parameter found. To auto-confirm on non-webhook.site "
+                        "listeners, set 'ssrf_callback_verify_url' to a URL that returns "
+                        "events containing the probe token. Otherwise, check your dashboard "
+                        "for any inbound "
                         "hit containing a 'probe=' token to confirm out-of-band SSRF."),
             ))
 

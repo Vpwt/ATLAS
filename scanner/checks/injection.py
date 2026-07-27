@@ -29,6 +29,12 @@ PAYLOADS = [
     "rO0ABXQABHRlc3Q=",                             # Java serialized-object (base64) marker
 ]
 
+BOOLEAN_TESTS = [
+    ("1' AND '1'='1", "1' AND '1'='2", "SQL boolean-based injection"),
+    ("1 OR 1=1", "1 OR 1=2", "SQL boolean-based injection"),
+    ("true || true", "true || false", "NoSQL boolean-based injection"),
+]
+
 ERROR_SIGNATURES = [
     "sql syntax", "sqlstate", "ora-", "postgresql", "sqlite3.operationalerror",
     "unclosed quotation mark", "traceback (most recent call last)",
@@ -42,16 +48,19 @@ ERROR_SIGNATURES = [
 # TIME_DELAY_SECONDS. If the response takes meaningfully longer than a clean
 # baseline request, that's strong evidence the payload reached a SQL engine or
 # shell even though nothing came back in the response body (blind injection).
-TIME_DELAY_SECONDS = 4
-TIME_BASED_PAYLOADS = [
-    (f"1' AND SLEEP({TIME_DELAY_SECONDS})-- -", "MySQL time-based blind SQL injection"),
-    (f"1'; SELECT pg_sleep({TIME_DELAY_SECONDS})--", "PostgreSQL time-based blind SQL injection"),
-    (f"1 WAITFOR DELAY '0:0:{TIME_DELAY_SECONDS}'--", "MSSQL time-based blind SQL injection"),
-    (f"$(sleep {TIME_DELAY_SECONDS})", "OS command time-based blind injection"),
-    (f"; sleep {TIME_DELAY_SECONDS}", "OS command time-based blind injection"),
-]
+TIME_DELAYS = (2, 4, 6)
 # How much slower than baseline (in seconds) counts as suspicious.
-TIME_DELTA_THRESHOLD = TIME_DELAY_SECONDS * 0.7
+TIME_DELTA_THRESHOLD_FACTOR = 0.7
+
+
+def _build_time_based_payloads(delay_seconds: int) -> list[tuple[str, str]]:
+    return [
+        (f"1' AND SLEEP({delay_seconds})-- -", "MySQL time-based blind SQL injection"),
+        (f"1'; SELECT pg_sleep({delay_seconds})--", "PostgreSQL time-based blind SQL injection"),
+        (f"1 WAITFOR DELAY '0:0:{delay_seconds}'--", "MSSQL time-based blind SQL injection"),
+        (f"$(sleep {delay_seconds})", "OS command time-based blind injection"),
+        (f"; sleep {delay_seconds}", "OS command time-based blind injection"),
+    ]
 
 
 def _timed_request(client, ep: Endpoint, path: str, param_name: str, value):
@@ -67,7 +76,8 @@ def _timed_request(client, ep: Endpoint, path: str, param_name: str, value):
         resp = client.request(ep.method, path,
                                params=test_params if ep.method == "GET" else None,
                                json_body=test_body if ep.method in ("POST", "PUT", "PATCH") else None,
-                               auth_override="keep")
+                               auth_override="keep",
+                               body_content_type=ep.body_content_type)
     except Exception:
         return None, None
     return resp, time.monotonic() - start
@@ -81,27 +91,79 @@ def _check_time_based_blind(client, ep: Endpoint, path: str, label: str, param_n
     if baseline_resp is None:
         return findings
 
-    for payload, description in TIME_BASED_PAYLOADS:
-        resp, elapsed = _timed_request(client, ep, path, param_name, payload)
-        if resp is None:
+    for delay_seconds in TIME_DELAYS:
+        threshold = delay_seconds * TIME_DELTA_THRESHOLD_FACTOR
+        for payload, description in _build_time_based_payloads(delay_seconds):
+            resp, elapsed = _timed_request(client, ep, path, param_name, payload)
+            if resp is None:
+                continue
+            delta = elapsed - baseline_elapsed
+            if delta >= threshold and elapsed >= threshold:
+                findings.append(Finding(
+                    check="injection", severity=Severity.HIGH,
+                    title=f"Possible {description}",
+                    endpoint=label,
+                    detail=(f"Sending a time-delay payload into parameter '{param_name}' made the "
+                            f"response take {elapsed:.1f}s vs a {baseline_elapsed:.1f}s baseline "
+                            f"(+{delta:.1f}s) - consistent with the payload reaching a query/shell "
+                            "even though no error or reflected content was visible in the response "
+                            "(blind injection)."),
+                    evidence=(f"payload={payload!r}, baseline={baseline_elapsed:.1f}s, "
+                              f"delayed={elapsed:.1f}s, delay_target={delay_seconds}s"),
+                    owasp_ref="API8:2023 Security Misconfiguration / Injection",
+                    curl_repro=getattr(resp, "curl_repro", ""),
+                ))
+                return findings  # one confirmed hit per param is enough
+
+    return findings
+
+
+def _check_boolean_blind(client, ep: Endpoint, path: str, label: str, param_name: str) -> list[Finding]:
+    findings = []
+    for true_payload, false_payload, description in BOOLEAN_TESTS:
+        true_params = dict(ep.params)
+        false_params = dict(ep.params)
+        true_params[param_name] = true_payload
+        false_params[param_name] = false_payload
+
+        try:
+            resp_true = client.request(
+                ep.method,
+                path,
+                params=true_params if ep.method == "GET" else None,
+                json_body={**(ep.body or {}), param_name: true_payload}
+                if ep.method in ("POST", "PUT", "PATCH") else None,
+                auth_override="keep",
+                body_content_type=ep.body_content_type,
+            )
+            resp_false = client.request(
+                ep.method,
+                path,
+                params=false_params if ep.method == "GET" else None,
+                json_body={**(ep.body or {}), param_name: false_payload}
+                if ep.method in ("POST", "PUT", "PATCH") else None,
+                auth_override="keep",
+                body_content_type=ep.body_content_type,
+            )
+        except Exception:
             continue
-        delta = elapsed - baseline_elapsed
-        if delta >= TIME_DELTA_THRESHOLD and elapsed >= TIME_DELTA_THRESHOLD:
+
+        true_len = len(resp_true.text or "")
+        false_len = len(resp_false.text or "")
+        if resp_true.status_code != resp_false.status_code or abs(true_len - false_len) > max(40, int(0.2 * max(true_len, false_len, 1))):
             findings.append(Finding(
-                check="injection", severity=Severity.HIGH,
+                check="injection", severity=Severity.MEDIUM,
                 title=f"Possible {description}",
                 endpoint=label,
-                detail=(f"Sending a time-delay payload into parameter '{param_name}' made the "
-                        f"response take {elapsed:.1f}s vs a {baseline_elapsed:.1f}s baseline "
-                        f"(+{delta:.1f}s) - consistent with the payload reaching a query/shell "
-                        "even though no error or reflected content was visible in the response "
-                        "(blind injection)."),
-                evidence=f"payload={payload!r}, baseline={baseline_elapsed:.1f}s, delayed={elapsed:.1f}s",
+                detail=(f"Boolean true/false payloads in '{param_name}' produced meaningfully "
+                        "different responses. This can indicate blind injection behavior when "
+                        "error signatures are absent."),
+                evidence=(f"true_status={resp_true.status_code}, false_status={resp_false.status_code}, "
+                          f"true_len={true_len}, false_len={false_len}"),
                 owasp_ref="API8:2023 Security Misconfiguration / Injection",
-                curl_repro=getattr(resp, "curl_repro", ""),
+                curl_repro=getattr(resp_true, "curl_repro", ""),
             ))
-            break  # one confirmed hit per param is enough
-
+            break
     return findings
 
 
@@ -125,7 +187,8 @@ def run(client, endpoints: list[Endpoint]) -> list[Finding]:
                                            params=test_params if ep.method == "GET" else None,
                                            json_body={**(ep.body or {}), param_name: payload}
                                            if ep.method in ("POST", "PUT", "PATCH") else None,
-                                           auth_override="keep")
+                                           auth_override="keep",
+                                           body_content_type=ep.body_content_type)
                 except Exception:
                     continue
 
@@ -178,6 +241,7 @@ def run(client, endpoints: list[Endpoint]) -> list[Finding]:
             # Time-based blind injection probe: only meaningful once per param
             # (it does its own baseline comparison), and deliberately kept
             # separate from the payload loop above since it adds latency.
+            findings.extend(_check_boolean_blind(client, ep, path, label, param_name))
             findings.extend(_check_time_based_blind(client, ep, path, label, param_name))
 
     return findings

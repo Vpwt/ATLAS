@@ -17,6 +17,7 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 from scanner.models import Endpoint, Finding, Severity
 
 try:
@@ -89,8 +90,24 @@ def _fetch_public_key_pem(jwks_url: str, kid: str) -> bytes:
         return None
 
 
+def _load_secret_wordlist(path: str) -> list[str]:
+    if not path or not os.path.exists(path):
+        return []
+    secrets = []
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                value = line.strip()
+                if value and not value.startswith("#"):
+                    secrets.append(value)
+    except Exception:
+        return []
+    return secrets
+
+
 def run(client, endpoints: list[Endpoint], jwt_sample_token: str = None,
-        jwt_public_key: str = None, jwks_url: str = None) -> list[Finding]:
+        jwt_public_key: str = None, jwks_url: str = None,
+        jwt_secret_wordlist: str = None) -> list[Finding]:
     findings = []
 
     if not jwt_sample_token:
@@ -132,7 +149,8 @@ def run(client, endpoints: list[Endpoint], jwt_sample_token: str = None,
         try:
             resp = client.request(ep.method, path, headers={"Authorization": f"Bearer {forged_token}"},
                                    params=ep.params if ep.method == "GET" else None,
-                                   json_body=ep.body, auth_override="keep")
+                                       json_body=ep.body, auth_override="keep",
+                                       body_content_type=ep.body_content_type)
         except Exception:
             continue
 
@@ -152,7 +170,8 @@ def run(client, endpoints: list[Endpoint], jwt_sample_token: str = None,
 
     # 2. weak secret probe (only meaningful for HS256/HS384/HS512 tokens)
     if header.get("alg", "").upper().startswith("HS"):
-        for secret in COMMON_WEAK_SECRETS:
+        weak_secrets = list(dict.fromkeys(COMMON_WEAK_SECRETS + _load_secret_wordlist(jwt_secret_wordlist)))
+        for secret in weak_secrets:
             try:
                 pyjwt.decode(jwt_sample_token, secret, algorithms=[header["alg"]])
                 findings.append(Finding(
@@ -185,7 +204,8 @@ def run(client, endpoints: list[Endpoint], jwt_sample_token: str = None,
             try:
                 resp = client.request(ep.method, path, headers={"Authorization": f"Bearer {variant_token}"},
                                        params=ep.params if ep.method == "GET" else None,
-                                       json_body=ep.body, auth_override="keep")
+                                       json_body=ep.body, auth_override="keep",
+                                       body_content_type=ep.body_content_type)
             except Exception:
                 continue
             if resp.status_code < 300:
@@ -226,7 +246,8 @@ def run(client, endpoints: list[Endpoint], jwt_sample_token: str = None,
                 try:
                     resp = client.request(ep.method, path, headers={"Authorization": f"Bearer {kid_token}"},
                                            params=ep.params if ep.method == "GET" else None,
-                                           json_body=ep.body, auth_override="keep")
+                                           json_body=ep.body, auth_override="keep",
+                                           body_content_type=ep.body_content_type)
                 except Exception:
                     continue
                 if resp.status_code < 300:
@@ -291,7 +312,8 @@ def run(client, endpoints: list[Endpoint], jwt_sample_token: str = None,
                             resp = client.request(ep.method, path,
                                                    headers={"Authorization": f"Bearer {confused_token}"},
                                                    params=ep.params if ep.method == "GET" else None,
-                                                   json_body=ep.body, auth_override="keep")
+                                                   json_body=ep.body, auth_override="keep",
+                                                   body_content_type=ep.body_content_type)
                         except Exception:
                             continue
                         if resp.status_code < 300:

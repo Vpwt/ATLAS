@@ -29,7 +29,8 @@ def run(client, endpoints: list[Endpoint]) -> list[Finding]:
 
         for body in malformed_bodies:
             try:
-                resp = client.request(ep.method, path, json_body=body, auth_override="keep")
+                resp = client.request(ep.method, path, json_body=body, auth_override="keep",
+                                      body_content_type=ep.body_content_type)
             except Exception:
                 continue
 

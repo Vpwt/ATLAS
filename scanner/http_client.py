@@ -4,19 +4,26 @@ import shlex
 import time
 from urllib.parse import urlencode
 import requests
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 
 def build_curl(method: str, url: str, headers: Optional[dict] = None,
-                params: Optional[dict] = None, json_body: Optional[dict] = None) -> str:
+                params: Optional[dict] = None, json_body: Optional[dict] = None,
+                body_content_type: str = "application/json") -> str:
     """Builds a copy-pasteable curl command reproducing a request, for PoC/repro
     steps in findings. Purely for display - never executed by this tool."""
     parts = ["curl", "-i", "-X", method.upper()]
     for key, value in (headers or {}).items():
         parts += ["-H", shlex.quote(f"{key}: {value}")]
     if json_body is not None:
-        parts += ["-H", shlex.quote("Content-Type: application/json")]
-        parts += ["-d", shlex.quote(json.dumps(json_body))]
+        ctype = (body_content_type or "application/json").lower()
+        if ctype and "content-type" not in {k.lower() for k in (headers or {}).keys()} and ctype != "multipart/form-data":
+            parts += ["-H", shlex.quote(f"Content-Type: {body_content_type}")]
+        if ctype == "application/x-www-form-urlencoded" and isinstance(json_body, dict):
+            parts += ["--data", shlex.quote(urlencode(json_body))]
+        else:
+            payload = json_body if isinstance(json_body, str) else json.dumps(json_body)
+            parts += ["-d", shlex.quote(payload)]
 
     full_url = url
     if params:
@@ -43,7 +50,8 @@ class ApiClient:
 
     def request(self, method: str, path: str, headers: Optional[dict] = None,
                 params: Optional[dict] = None, json_body: Optional[dict] = None,
-                auth_override: Optional[str] = "keep") -> requests.Response:
+                auth_override: Optional[str] = "keep",
+                body_content_type: str = "application/json") -> requests.Response:
         """
         auth_override:
           "keep"  -> use default_headers as-is (includes auth if configured)
@@ -70,16 +78,36 @@ class ApiClient:
             time.sleep(self.request_delay)
 
         self.request_count += 1
+        request_kwargs: dict[str, Any] = {
+            "method": method.upper(),
+            "url": url,
+            "headers": merged_headers,
+            "params": params,
+            "timeout": self.timeout,
+            "verify": self.verify_tls,
+        }
+
+        ctype = (body_content_type or "application/json").lower()
+        if json_body is not None:
+            if ctype == "application/x-www-form-urlencoded":
+                request_kwargs["data"] = json_body
+                request_kwargs["headers"].setdefault("Content-Type", "application/x-www-form-urlencoded")
+            elif ctype == "multipart/form-data":
+                # Let requests set the multipart boundary/header automatically.
+                request_kwargs["files"] = {k: (None, str(v)) for k, v in (json_body or {}).items()}
+            elif ctype == "application/json" or ctype.endswith("+json"):
+                request_kwargs["json"] = json_body
+            else:
+                if isinstance(json_body, str):
+                    request_kwargs["data"] = json_body
+                else:
+                    request_kwargs["data"] = json.dumps(json_body)
+                request_kwargs["headers"].setdefault("Content-Type", body_content_type)
+
         resp = requests.request(
-            method=method.upper(),
-            url=url,
-            headers=merged_headers,
-            params=params,
-            json=json_body,
-            timeout=self.timeout,
-            verify=self.verify_tls,
+            **request_kwargs,
         )
         # Attach a ready-to-run curl reproduction to every response so check
         # modules can optionally surface it as PoC evidence on a Finding.
-        resp.curl_repro = build_curl(method, url, merged_headers, params, json_body)
+        resp.curl_repro = build_curl(method, url, merged_headers, params, json_body, body_content_type)
         return resp

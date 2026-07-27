@@ -28,23 +28,23 @@ extra checks that don't map to a single category:
 |---|---|---|
 | `auth` | API2 Broken Authentication | Tests protected endpoints with no token and with a garbage token |
 | `bola` | API1 Broken Object Level Authorization | Swaps in "foreign" object IDs to see if they're wrongly accessible |
-| `bfla` | API5 Broken Function Level Authorization | Tests `admin_only` endpoints with no auth / a low-privilege token; optionally tries undeclared HTTP methods per path (verb tampering) |
-| `injection` | API8 Security Misconfiguration | Sends SQLi/NoSQLi/command/SSTI/LDAP/XSS-style payloads, watches for 5xx errors, leaked DB error signatures, or reflected unescaped HTML; also runs a time-based blind-injection probe (SLEEP/pg_sleep/WAITFOR/command-sleep payloads compared against a clean baseline) for cases with no visible error or reflection |
-| `ssrf` | API7 Server Side Request Forgery | Probes URL-shaped params/fields (webhooks, callbacks, image URLs, etc.) with cloud-metadata/loopback/file:// payloads; optionally confirms true out-of-band SSRF via a configurable attacker-controlled callback URL (`ssrf_callback_url`) |
+| `bfla` | API5 Broken Function Level Authorization | Tests admin-like endpoints with no auth / a low-privilege token (explicit admin_only plus path/description heuristics); verb tampering supports safe mode (GET/HEAD/OPTIONS) or full mode |
+| `injection` | API8 Security Misconfiguration | Sends SQLi/NoSQLi/command/SSTI/LDAP/XSS/deserialization-style payloads, watches for 5xx and leaked error signatures, runs boolean-differential probes, and adaptive time-based blind probes (2/4/6 second delays) |
+| `ssrf` | API7 Server Side Request Forgery | Probes URL-shaped params/fields with cloud-metadata/loopback/file payloads; supports out-of-band callback confirmation with webhook.site or generic verify URL polling |
 | `rate_limit` | API4 Unrestricted Resource Consumption | Bursts requests at an endpoint checking for HTTP 429; also tests uncapped pagination/page-size params |
 | `headers` | API8 Security Misconfiguration | Checks for missing security headers (HSTS, CSP, X-Frame-Options) and overly permissive CORS |
 | `http_methods` | API8 Security Misconfiguration | Checks for the HTTP TRACE method being enabled and dangerous methods advertised on unauthenticated paths |
 | `mass_assignment` | API6 Unrestricted Access to Sensitive Business Flows | Sends extra fields like `is_admin`/`role` in write requests to see if they're silently accepted |
 | `excessive_data_exposure` | API3 Broken Object Property Level Authorization | Scans GET responses for sensitive-looking fields (passwords, tokens, SSNs, etc.) that shouldn't be exposed |
-| `jwt` | API2 Broken Authentication | Tests `alg=none` (and case-variant) forgery, `kid` header path traversal / key confusion, a small list of common weak HMAC secrets, and (given a public key via `jwt_public_key`/`jwks_url`) an RS256/ES256->HS256 algorithm-confusion attack |
+| `jwt` | API2 Broken Authentication | Tests `alg=none` (and case-variant) forgery, `kid` header path traversal / key confusion, weak HMAC secrets (built-in plus optional external wordlist), and (given a public key via `jwt_public_key`/`jwks_url`) an RS256/ES256->HS256 algorithm-confusion attack |
 | `error_disclosure` | API8 Security Misconfiguration | Sends malformed input, checks for leaked stack traces/internal paths |
-| `api_inventory` | API9 Improper Inventory Management | Probes for exposed docs/debug/admin paths (`.env`, `.git`, actuator, swagger) and shadow/older API version prefixes; also passively mines `robots.txt`/`sitemap.xml` for undocumented paths |
+| `api_inventory` | API9 Improper Inventory Management | Probes exposed docs/debug/admin paths and shadow versions; mines robots/sitemap and also scrapes homepage links/scripts for additional API-like paths |
 | `graphql` | API9/API5/API4 Improper Inventory Management / Broken Function Level Authorization / Unrestricted Resource Consumption | Opt-in (`graphql_endpoint`): runs a standard introspection query, flags introspection being enabled, flags sensitive-sounding mutation names (delete/admin/grant/impersonate/...), probes for a query depth/complexity DoS vector, and probes for alias-based batching/rate-limit-bypass |
-| `business_logic` | API6 Unrestricted Access to Sensitive Business Flows | Opt-in (`workflows`): replays a configured multi-step flow, then re-replays it with `required` steps removed (single steps, then combinations of 2-3) to detect step-skipping bypasses (e.g. completing an order without paying, or bypassing two checks only when skipped together) |
+| `business_logic` | API6 Unrestricted Access to Sensitive Business Flows | Opt-in (`workflows`): replays configured flows, tests step-skipping and bounded step-reordering permutations; depth/combination limits are configurable |
+| `unsafe_consumption` | API10 Unsafe Consumption of APIs | Heuristic checks for risky upstream-target handling by injecting internal/suspicious URLs into URL-like fields and looking for acceptance or leaked upstream failure details |
 
-`API10:2023 Unsafe Consumption of APIs` isn't covered by an automated check
-since it depends on knowing which third-party APIs *your* API calls
-internally - see Limitations below.
+API10 is included as a heuristic black-box check (`unsafe_consumption`).
+For strict assurance, pair it with internal architecture/testing data.
 
 Every finding also carries a `cvss_score` (derived from severity) and, where
 a live HTTP request produced it, a ready-to-run `curl` **PoC/reproduction
@@ -100,7 +100,7 @@ python main.py --config config.yaml --output reports/scan_2026_07_27.html
 Available check names: `auth`, `bola`, `bfla`, `injection`, `ssrf`,
 `rate_limit`, `headers`, `http_methods`, `mass_assignment`,
 `excessive_data_exposure`, `jwt`, `error_disclosure`, `api_inventory`,
-`graphql`, `business_logic`.
+`graphql`, `business_logic`, `unsafe_consumption`.
 
 ## Config reference (key fields)
 
@@ -110,9 +110,15 @@ auth_header: "Bearer YOUR_TEST_TOKEN"       # used as the "authenticated" identi
 jwt_sample_token: ""                        # optional, enables JWT-specific checks
 jwt_public_key: ""                          # optional PEM string, enables RS256->HS256 algorithm-confusion attack
 jwks_url: ""                                # optional alt. to jwt_public_key: fetch the public key from a JWKS endpoint
+jwt_secret_wordlist: ""                     # optional path to a newline-separated secret wordlist for HS* JWT testing
 ssrf_callback_url: ""                       # optional attacker-controlled callback URL, enables out-of-band SSRF confirmation
+ssrf_callback_verify_url: ""                # optional URL returning callback events text/JSON; include {probe} placeholder if needed
 low_priv_auth_header: ""                    # optional 2nd, lower-privileged token, for BFLA testing
-enable_verb_tampering: false                # opt-in: try undeclared HTTP methods per path (can hit DELETE/PUT)
+enable_verb_tampering: false                # backward-compatible switch (if true and mode=off, treated as full)
+verb_tampering_mode: "safe"                 # off | safe | full
+business_logic_max_skip_combo_size: 3       # increase for deeper skip-combination exploration
+business_logic_max_reorder_steps: 5         # max steps in a workflow considered for reordering
+business_logic_max_reorder_permutations: 30 # cap tested permutations per workflow
 request_delay: 0.15                         # seconds between requests (be polite to your own API)
 rate_limit_burst: 25                        # requests sent in the rate-limiting test
 
@@ -123,6 +129,7 @@ endpoints:
     id_param: "id"            # which param in `path`/`params` is the object ID
     sample_ids: ["1001"]       # IDs the test account legitimately owns
     foreign_ids: ["1002"]      # IDs belonging to someone else (should be forbidden)
+    body_content_type: "application/json"  # optional: json, application/x-www-form-urlencoded, multipart/form-data, etc.
     params:
       id: "1001"
 
@@ -164,9 +171,10 @@ for it, complete it). The scanner replays it end-to-end as a baseline, then
 re-replays it with `required: true` steps removed - first one at a time,
 then in combinations of 2 (and 3, if there are few enough required steps)
 - to catch bypasses that only appear when steps are skipped *together*, not
-just individually. If the flow still completes successfully without those
-steps, that's a **business logic bypass** (e.g. an order can be completed
-without payment) and gets reported as a CRITICAL finding.
+just individually. It also tries bounded step reordering permutations to
+catch order-of-operations bugs (e.g. "complete" before "pay"). If the flow
+still completes successfully without those checks/order constraints, that's a
+**business logic bypass** and gets reported.
 
 ```yaml
 workflows:
@@ -317,7 +325,8 @@ api_security_scanner/
         ├── error_disclosure.py         # API8 Verbose error / stack trace leaks
         ├── api_inventory.py            # API9 Improper Inventory Management (+ robots.txt/sitemap.xml discovery)
         ├── graphql.py                  # GraphQL introspection / sensitive mutation discovery
-        └── business_logic.py           # Multi-step workflow chaining / step-skip bypass detection
+        ├── business_logic.py           # Multi-step workflow chaining / step-skip & reorder bypass detection
+        └── unsafe_consumption.py       # API10 heuristic upstream-consumption safety checks
 ```
 
 ## Extending it
@@ -335,56 +344,18 @@ over-permission checks, or response-time-based user enumeration detection.
 
 ## Limitations 
 
-- The injection check is a *smoke test*, not a replacement for a dedicated
-  fuzzer like `sqlmap` — it catches obvious cases (5xx errors, leaked
-  stack traces, reflected payloads), plus a small time-based blind
-  injection probe (SLEEP/pg_sleep/WAITFOR/command-sleep payloads compared
-  against a clean baseline). The time-based probe only tries a handful of
-  representative payloads/DBMSes and one fixed delay (4s) - it's a smoke
-  test for blind injection, not a full blind-injection fuzzer.
-- The SSRF check relies on leaked cloud-metadata/file content, a
-  slow/timing anomaly, or (if `ssrf_callback_url` is configured) a true
-  out-of-band callback hit. Automatic confirmation of the callback hit is
-  currently only implemented for `webhook.site` URLs - other
-  interactsh/Collaborator-style listeners require a manual dashboard check.
-- OpenAPI spec discovery handles `allOf`/`oneOf`/`anyOf` schema composition
-  and picks a best-effort content-type (preferring JSON, then
-  form/multipart, then whatever's first) for request body examples, but it
-  still doesn't handle every OpenAPI feature (e.g. OAuth2 flow details, or
-  wire-format differences - request bodies are always sent as JSON
-  regardless of the spec's declared content type, since the whole scanner
-  is JSON-body-oriented).
-- BOLA/mass-assignment checks still need you to manually specify
-  sample/foreign IDs (via `endpoints:` overrides) since a spec has no concept
-  of "an ID my test account owns" vs. "an ID belonging to someone else";
-  BFLA similarly needs `admin_only` flags (and ideally a
-  `low_priv_auth_header`) to be meaningful.
-- Verb tampering (part of `bfla`) is opt-in (`enable_verb_tampering`)
-  because it can exercise destructive HTTP verbs (DELETE/PUT/PATCH) against
-  real endpoints - only enable it against a test/staging environment.
-- JWT checks cover `alg=none` (+ case variants), a `kid`-header path
-  traversal probe, a short common-secret wordlist, and (given
-  `jwt_public_key`/`jwks_url`) an RS256/ES256→HS256 algorithm-confusion
-  attack — still not a full JWT cracker, and the confusion attack needs the
-  server's public key supplied/discoverable up front.
-- `API10:2023 Unsafe Consumption of APIs` has no automated check - it
-  requires knowing which third-party/upstream APIs your service calls,
-  which isn't discoverable from the outside.
-- There's no JavaScript-rendering crawler - "attack surface discovery" beyond
-  OpenAPI/Postman/manual config is limited to passively parsing
-  `robots.txt`/`sitemap.xml` (`api_inventory` check). Anything only
-  reachable by executing client-side JS won't be found.
-- The HTML report's "attack surface" section is a text table of endpoints
-  tested, not a visual/graphical map.
-- `business_logic` step-skip detection tries removing `required` steps
-  individually and in combinations of up to 2 (or 3, if there are 6 or
-  fewer required steps, to bound request count) - it doesn't try
-  reordering steps.
-- Deserialization checks (`injection`) only send a couple of generic
-  PHP/Java gadget *markers* and look for related error signatures - this is
-  a smoke test, not a real gadget-chain fuzzer (e.g. `ysoserial`).
-- `graphql` support includes introspection, a query-depth/complexity DoS
-  probe, and an alias-based batching probe, but both probes are best-effort
-  (built from whatever the discovered schema allows to nest/repeat) and
-  don't attempt full cost-based complexity analysis like a real GraphQL
-  security scanner would.
+- This is a black-box scanner by design. It cannot prove the absence of
+  vulnerabilities; it can only detect observable signals and suspicious
+  behaviors.
+- Some checks rely on test data quality. BOLA is strongest when explicit
+  owned vs foreign IDs are provided, though heuristic foreign-ID generation
+  now runs when they are missing.
+- Deep/exhaustive workflow exploration and GraphQL complexity analysis are
+  configurable but intentionally bounded by default to keep scan runtime and
+  request volume practical.
+- Advanced exploit frameworks (full SQLi extraction, full gadget-chain
+  generation, full JWT brute-force cracking) are outside scope of this
+  scanner and are best handled by specialized tools.
+- Browser-side JavaScript execution paths are partially covered through
+  script scraping, but this is still not equivalent to a full authenticated
+  dynamic browser crawler with user-journey replay.

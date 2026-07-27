@@ -14,15 +14,13 @@ twice:
 Values extracted from one step's response (via `extract`) are substituted
 into later steps' `{placeholders}` in path/params/body.
 """
-from itertools import combinations
+from itertools import combinations, permutations
 from scanner.models import Finding, Severity
 
-# How many required steps can be skipped together in one replay. Raising this
-# grows request count combinatorially (C(n, k)), so it's capped.
-MAX_SKIP_COMBO_SIZE = 3
-# If there are more required steps than this, only try skipping 1 or 2 at a
-# time (skip triples) to avoid an explosion of requests.
-MAX_REQUIRED_STEPS_FOR_TRIPLES = 6
+DEFAULT_MAX_SKIP_COMBO_SIZE = 3
+DEFAULT_MAX_REQUIRED_STEPS_FOR_TRIPLES = 6
+DEFAULT_MAX_REORDER_STEPS = 5
+DEFAULT_MAX_REORDER_PERMUTATIONS = 30
 
 
 def _substitute(value, variables: dict):
@@ -58,10 +56,12 @@ def _run_steps(client, steps: list, variables: dict):
         path = _substitute(step["path"], variables)
         body = _substitute(step.get("body"), variables)
         params = _substitute(step.get("params", {}), variables)
+        body_content_type = step.get("body_content_type", "application/json")
 
         try:
             resp = client.request(method, path, params=params if method == "GET" else None,
-                                   json_body=body, auth_override="keep")
+                                   json_body=body, auth_override="keep",
+                                   body_content_type=body_content_type)
         except Exception:
             results.append((step["name"], None))
             return results, False
@@ -79,7 +79,9 @@ def _run_steps(client, steps: list, variables: dict):
     return results, True
 
 
-def run(client, workflows: list) -> list[Finding]:
+def run(client, workflows: list, max_skip_combo_size: int = DEFAULT_MAX_SKIP_COMBO_SIZE,
+    max_reorder_steps: int = DEFAULT_MAX_REORDER_STEPS,
+    max_reorder_permutations: int = DEFAULT_MAX_REORDER_PERMUTATIONS) -> list[Finding]:
     findings = []
     if not workflows:
         return findings
@@ -106,8 +108,8 @@ def run(client, workflows: list) -> list[Finding]:
             continue
 
         required_steps = [s for s in steps if s.get("required")]
-        max_combo_size = min(MAX_SKIP_COMBO_SIZE, len(required_steps))
-        if len(required_steps) > MAX_REQUIRED_STEPS_FOR_TRIPLES:
+        max_combo_size = min(max(1, int(max_skip_combo_size)), len(required_steps))
+        if len(required_steps) > DEFAULT_MAX_REQUIRED_STEPS_FOR_TRIPLES:
             max_combo_size = min(max_combo_size, 2)
 
         for combo_size in range(1, max_combo_size + 1):
@@ -143,5 +145,58 @@ def run(client, workflows: list) -> list[Finding]:
                     evidence=f"results without [{skipped_label}]: {results}",
                     owasp_ref="API6:2023 Unrestricted Access to Sensitive Business Flows",
                 ))
+
+        findings.extend(_check_step_reordering(
+            client,
+            name,
+            steps,
+            baseline_variables,
+            max_reorder_steps=max_reorder_steps,
+            max_reorder_permutations=max_reorder_permutations,
+        ))
+
+    return findings
+
+
+def _check_step_reordering(client, workflow_name: str, steps: list, baseline_variables: dict,
+                           max_reorder_steps: int, max_reorder_permutations: int) -> list[Finding]:
+    """Try reordered workflow execution to find order-of-operations bypasses.
+
+    Many workflows validate preconditions only in the expected order. If an
+    attacker can perform the same actions out of order (e.g., finalize before
+    payment), that can be a logic flaw even when step-skipping is blocked.
+    """
+    if len(steps) < 3 or len(steps) > max_reorder_steps:
+        return []
+
+    findings = []
+    seen = 0
+    original_sig = tuple(step.get("name") for step in steps)
+
+    for perm in permutations(steps):
+        if tuple(step.get("name") for step in perm) == original_sig:
+            continue
+        if seen >= max_reorder_permutations:
+            break
+        seen += 1
+
+        variables = dict(baseline_variables)
+        results, ok = _run_steps(client, list(perm), variables)
+        if not ok:
+            continue
+
+        perm_names = [s.get("name") for s in perm]
+        findings.append(Finding(
+            check="business_logic", severity=Severity.HIGH,
+            title="Possible workflow bypass: reordered steps still complete successfully",
+            endpoint=f"workflow: {workflow_name}",
+            detail=(f"Workflow '{workflow_name}' completed successfully with a non-canonical "
+                    f"step order: {perm_names}. This can indicate missing server-side "
+                    "enforcement of order-of-operations preconditions."),
+            evidence=f"reordered results: {results}",
+            owasp_ref="API6:2023 Unrestricted Access to Sensitive Business Flows",
+        ))
+        # One successful reordered path is enough evidence.
+        break
 
     return findings

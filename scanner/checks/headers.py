@@ -19,7 +19,8 @@ def run(client, endpoints: list[Endpoint]) -> list[Finding]:
 
         try:
             resp = client.request(ep.method, path, params=ep.params if ep.method == "GET" else None,
-                                   json_body=ep.body, auth_override="keep")
+                                   json_body=ep.body, auth_override="keep",
+                                   body_content_type=ep.body_content_type)
         except Exception:
             continue
 

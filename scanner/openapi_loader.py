@@ -128,32 +128,53 @@ def _pick_content_entry(content: dict) -> Optional[dict]:
     return next(iter(content.values()), None)
 
 
-def _request_body_example(spec: dict, operation: dict) -> Optional[dict]:
-    """Best-effort JSON body example for an operation (OpenAPI 3.x requestBody)."""
+def _request_body_example(spec: dict, operation: dict) -> tuple[Optional[dict], str]:
+    """Best-effort body example + content type for an operation.
+
+    Returns (body_dict_or_none, content_type). Content type defaults to
+    application/json when no request body exists.
+    """
     request_body = operation.get("requestBody")
     if isinstance(request_body, dict) and "$ref" in request_body:
         request_body = _resolve_ref(spec, request_body["$ref"])
     if not isinstance(request_body, dict):
-        return None
+        return None, "application/json"
 
     content = request_body.get("content", {})
-    json_content = _pick_content_entry(content)
+    picked_name = None
+    picked_entry = None
+    if content:
+        for name, entry in content.items():
+            if name == "application/json" or name.endswith("+json"):
+                picked_name, picked_entry = name, entry
+                break
+        if picked_entry is None:
+            for name, entry in content.items():
+                if name in ("application/x-www-form-urlencoded", "multipart/form-data"):
+                    picked_name, picked_entry = name, entry
+                    break
+        if picked_entry is None:
+            picked_name, picked_entry = next(iter(content.items()))
+
+    json_content = picked_entry
     if not isinstance(json_content, dict):
-        return None
+        return None, (picked_name or "application/json")
 
     if "example" in json_content:
-        return json_content["example"]
+        value = json_content["example"]
+        return (value if isinstance(value, dict) else None), (picked_name or "application/json")
     examples = json_content.get("examples")
     if isinstance(examples, dict) and examples:
         first = next(iter(examples.values()))
         if isinstance(first, dict) and "value" in first:
-            return first["value"]
+            value = first["value"]
+            return (value if isinstance(value, dict) else None), (picked_name or "application/json")
 
     schema = json_content.get("schema")
     if schema:
         value = _example_value_for_schema(spec, schema)
-        return value if isinstance(value, dict) else None
-    return None
+        return (value if isinstance(value, dict) else None), (picked_name or "application/json")
+    return None, (picked_name or "application/json")
 
 
 def _operation_requires_auth(spec: dict, operation: dict) -> bool:
@@ -204,12 +225,14 @@ def load_endpoints_from_spec(source: str) -> list:
             tags = [str(t).lower() for t in operation.get("tags", [])]
             admin_only = "admin" in raw_path.lower() or "admin" in tags
 
+            body_example, body_content_type = _request_body_example(spec, operation)
             endpoints.append(Endpoint(
                 path=raw_path,
                 method=method_lower.upper(),
                 auth_required=_operation_requires_auth(spec, operation),
                 params=params,
-                body=_request_body_example(spec, operation),
+                body=body_example,
+                body_content_type=body_content_type,
                 id_param=id_param,
                 sample_ids=[],
                 foreign_ids=[],

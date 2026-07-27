@@ -85,12 +85,14 @@ def write_html_report(findings: list[Finding], base_url: str, output_path: str, 
           <td>{_esc(ep.description)}</td>
         </tr>""")
 
-    inventory_html = ""
-    if inventory_rows:
-        inventory_html = f"""
-  <h2>Attack surface (endpoints tested)</h2>
-  <table><thead><tr><th>Method</th><th>Path</th><th>Flags</th><th>Description</th></tr></thead>
-  <tbody>{"".join(inventory_rows)}</tbody></table>
+        inventory_html = ""
+        if inventory_rows:
+                graph_html = _build_attack_surface_graph(endpoints or [])
+                inventory_html = f"""
+    <h2>Attack surface (endpoints tested)</h2>
+    {graph_html}
+    <table><thead><tr><th>Method</th><th>Path</th><th>Flags</th><th>Description</th></tr></thead>
+    <tbody>{"".join(inventory_rows)}</tbody></table>
 """
 
     html = f"""<!DOCTYPE html>
@@ -110,7 +112,12 @@ def write_html_report(findings: list[Finding], base_url: str, output_path: str, 
   th {{ background: #1a1e26; position: sticky; top: 0; }}
   code {{ background: #1a1e26; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.8rem; word-break: break-all; }}
   .no-findings {{ color: #9ca3af; padding: 2rem; text-align: center; }}
+    .graph-wrap {{ background: #121722; border: 1px solid #262b33; border-radius: 8px; padding: 0.75rem; margin-bottom: 1rem; }}
+    .graph-note {{ color: #9ca3af; font-size: 0.8rem; margin: 0.25rem 0 0; }}
+    details summary {{ cursor: pointer; color: #cbd5e1; font-size: 0.85rem; }}
 </style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>if(window.mermaid){{mermaid.initialize({{startOnLoad:true, theme:'dark'}});}}</script>
 </head>
 <body>
   <h1>API Security Scan Report</h1>
@@ -129,3 +136,44 @@ def _esc(text) -> str:
     if text is None:
         return ""
     return (str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def _safe_node_id(value: str) -> str:
+    chars = []
+    for ch in value:
+        if ch.isalnum():
+            chars.append(ch)
+        else:
+            chars.append("_")
+    return "".join(chars)[:80] or "node"
+
+
+def _build_attack_surface_graph(endpoints: list) -> str:
+    if not endpoints:
+        return ""
+
+    lines = ["flowchart LR", "  root[\"API\"]"]
+    method_nodes = {}
+
+    for ep in endpoints:
+        method = (ep.method or "GET").upper()
+        method_id = f"m_{_safe_node_id(method)}"
+        if method_id not in method_nodes:
+            lines.append(f"  {method_id}[\"{method}\"]")
+            lines.append(f"  root --> {method_id}")
+            method_nodes[method_id] = True
+
+        path_label = _esc(ep.path)
+        endpoint_id = f"e_{_safe_node_id(method + '_' + ep.path)}"
+        lines.append(f"  {endpoint_id}[\"{path_label}\"]")
+        lines.append(f"  {method_id} --> {endpoint_id}")
+
+    mermaid_text = "\n".join(lines)
+    return (
+        '<div class="graph-wrap">'
+        '<div class="mermaid">' + mermaid_text + '</div>'
+        '<p class="graph-note">Method-to-endpoint map for quick visual triage.</p>'
+        '<details><summary>Show Mermaid source</summary>'
+        '<pre><code>' + _esc(mermaid_text) + '</code></pre></details>'
+        '</div>'
+    )

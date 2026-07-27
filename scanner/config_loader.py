@@ -12,6 +12,7 @@ def _endpoint_from_raw(ep_raw: dict) -> Endpoint:
         auth_required=ep_raw.get("auth_required", True),
         params=ep_raw.get("params", {}) or {},
         body=ep_raw.get("body"),
+        body_content_type=ep_raw.get("body_content_type", "application/json"),
         id_param=ep_raw.get("id_param"),
         sample_ids=ep_raw.get("sample_ids", []) or [],
         foreign_ids=ep_raw.get("foreign_ids", []) or [],
@@ -34,6 +35,8 @@ def _apply_override(base: Endpoint, ep_raw: dict) -> None:
         base.params.update(ep_raw["params"])
     if "body" in ep_raw:
         base.body = ep_raw["body"]
+    if "body_content_type" in ep_raw:
+        base.body_content_type = ep_raw["body_content_type"]
     if "id_param" in ep_raw:
         base.id_param = ep_raw["id_param"]
     if ep_raw.get("sample_ids"):
@@ -85,10 +88,12 @@ def load_config(path: str) -> dict:
         # (jwks_url). Not needed for HS256-signed tokens.
         "jwt_public_key": raw.get("jwt_public_key"),
         "jwks_url": raw.get("jwks_url"),
+        "jwt_secret_wordlist": raw.get("jwt_secret_wordlist"),
         # Optional attacker-controlled callback/collaborator URL (e.g. a
         # webhook.site URL) used by the ssrf check to confirm true
         # out-of-band SSRF when the HTTP response gives no visible signal.
         "ssrf_callback_url": raw.get("ssrf_callback_url"),
+        "ssrf_callback_verify_url": raw.get("ssrf_callback_verify_url"),
         # Optional automated login: instead of pasting a static auth_header,
         # perform a login request and extract a bearer token from it. See
         # scanner/auth_flow.py for the expected fields.
@@ -105,6 +110,10 @@ def load_config(path: str) -> dict:
         # Verb-tampering tests (trying undeclared HTTP methods against a path)
         # can hit destructive verbs like DELETE/PUT, so they're opt-in.
         "enable_verb_tampering": raw.get("enable_verb_tampering", False),
+        "verb_tampering_mode": raw.get("verb_tampering_mode", "safe"),
+        "business_logic_max_skip_combo_size": raw.get("business_logic_max_skip_combo_size", 3),
+        "business_logic_max_reorder_steps": raw.get("business_logic_max_reorder_steps", 5),
+        "business_logic_max_reorder_permutations": raw.get("business_logic_max_reorder_permutations", 30),
         "request_delay": raw.get("request_delay", 0.1),
         "rate_limit_burst": raw.get("rate_limit_burst", 25),
         "verify_tls": raw.get("verify_tls", True),

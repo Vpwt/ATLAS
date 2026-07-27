@@ -29,7 +29,8 @@ def run(client, endpoints: list[Endpoint]) -> list[Finding]:
         injected_body = {**base_body, **SENSITIVE_EXTRA_FIELDS}
 
         try:
-            resp = client.request(ep.method, path, json_body=injected_body, auth_override="keep")
+            resp = client.request(ep.method, path, json_body=injected_body, auth_override="keep",
+                                   body_content_type=ep.body_content_type)
         except Exception:
             continue
 

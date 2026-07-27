@@ -6,36 +6,50 @@ Two probes:
      confirm privileged functions actually reject non-admin callers.
   2. Verb tampering: HTTP methods that were never declared for a given path
      are tried against it, to catch cases where authorization is enforced
-     for some verbs but not others on the same route. This is opt-in
-     (enable_verb_tampering) since it can exercise destructive verbs like
-     DELETE/PUT against real endpoints.
+     for some verbs but not others on the same route. "safe" mode only tries
+     non-destructive methods; "full" includes potentially destructive verbs.
 """
 from scanner.models import Endpoint, Finding, Severity
 
-_CANDIDATE_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"]
+_CANDIDATE_METHODS_SAFE = ["GET", "HEAD", "OPTIONS"]
+_CANDIDATE_METHODS_FULL = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
+_ADMIN_HINTS = ("admin", "role", "permission", "grant", "promote", "internal")
 
 
 def run(client, endpoints: list[Endpoint], low_priv_auth_header: str = None,
-        enable_verb_tampering: bool = False) -> list[Finding]:
+        enable_verb_tampering: bool = False,
+        verb_tampering_mode: str = "safe") -> list[Finding]:
     findings = []
     findings.extend(_check_admin_only_endpoints(client, endpoints, low_priv_auth_header))
-    if enable_verb_tampering:
-        findings.extend(_check_verb_tampering(client, endpoints))
+    mode = verb_tampering_mode.lower().strip() if isinstance(verb_tampering_mode, str) else "safe"
+    if enable_verb_tampering and mode == "off":
+        mode = "full"
+    if mode in ("safe", "full"):
+        findings.extend(_check_verb_tampering(client, endpoints, mode))
     return findings
+
+
+def _likely_admin(ep: Endpoint) -> bool:
+    if ep.admin_only:
+        return True
+    path = (ep.path or "").lower()
+    desc = (ep.description or "").lower()
+    return any(h in path or h in desc for h in _ADMIN_HINTS)
 
 
 def _check_admin_only_endpoints(client, endpoints, low_priv_auth_header) -> list:
     findings = []
 
     for ep in endpoints:
-        if not ep.admin_only:
+        if not _likely_admin(ep):
             continue
         path = ep.resolved_path()
         label = f"{ep.method} {path}"
 
         try:
             resp = client.request(ep.method, path, params=ep.params if ep.method == "GET" else None,
-                                   json_body=ep.body, auth_override="strip")
+                                       json_body=ep.body, auth_override="strip",
+                                       body_content_type=ep.body_content_type)
             if resp.status_code < 300:
                 findings.append(Finding(
                     check="bfla", severity=Severity.CRITICAL,
@@ -55,7 +69,8 @@ def _check_admin_only_endpoints(client, endpoints, low_priv_auth_header) -> list
         try:
             resp = client.request(ep.method, path, headers={"Authorization": low_priv_auth_header},
                                    params=ep.params if ep.method == "GET" else None,
-                                   json_body=ep.body, auth_override="keep")
+                                       json_body=ep.body, auth_override="keep",
+                                       body_content_type=ep.body_content_type)
             if resp.status_code < 300:
                 findings.append(Finding(
                     check="bfla", severity=Severity.CRITICAL,
@@ -75,7 +90,7 @@ def _check_admin_only_endpoints(client, endpoints, low_priv_auth_header) -> list
     return findings
 
 
-def _check_verb_tampering(client, endpoints) -> list:
+def _check_verb_tampering(client, endpoints, mode: str) -> list:
     findings = []
 
     declared_methods_by_path = {}
@@ -88,7 +103,8 @@ def _check_verb_tampering(client, endpoints) -> list:
             continue
         declared = declared_methods_by_path.get(ep.path, set())
 
-        for candidate in _CANDIDATE_METHODS:
+        candidates = _CANDIDATE_METHODS_FULL if mode == "full" else _CANDIDATE_METHODS_SAFE
+        for candidate in candidates:
             key = (ep.path, candidate)
             if candidate in declared or key in tested:
                 continue
@@ -99,7 +115,8 @@ def _check_verb_tampering(client, endpoints) -> list:
             try:
                 resp = client.request(candidate, path, params=ep.params if candidate == "GET" else None,
                                        json_body=ep.body if candidate in ("POST", "PUT", "PATCH") else None,
-                                       auth_override="keep")
+                                           auth_override="keep",
+                                           body_content_type=ep.body_content_type)
             except Exception:
                 continue
 

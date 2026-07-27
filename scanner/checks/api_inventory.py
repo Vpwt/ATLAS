@@ -60,6 +60,23 @@ def _paths_from_sitemap(text: str) -> set:
     return paths
 
 
+def _paths_from_html_links(html: str) -> set:
+    paths = set()
+    for m in re.finditer(r"(?i)(?:href|src)=['\"]([^'\"]+)['\"]", html or ""):
+        ref = (m.group(1) or "").strip()
+        if ref.startswith("/"):
+            paths.add(ref)
+    return paths
+
+
+def _api_like_paths_from_js(js_text: str) -> set:
+    paths = set()
+    pattern = re.compile(r"['\"](/(?:api|graphql|v\d+)[^'\"\s]*)['\"]", re.IGNORECASE)
+    for m in pattern.finditer(js_text or ""):
+        paths.add(m.group(1))
+    return paths
+
+
 def run(client, endpoints: list[Endpoint]) -> list[Finding]:
     findings = []
 
@@ -87,8 +104,8 @@ def run(client, endpoints: list[Endpoint]) -> list[Finding]:
                 curl_repro=getattr(resp, "curl_repro", ""),
             ))
 
-    # Passive discovery: robots.txt / sitemap.xml often reference paths that
-    # aren't in the hand-maintained endpoint list.
+    # Passive discovery: robots.txt / sitemap.xml, plus lightweight HTML/script
+    # scraping for additional API-like paths.
     discovered_paths = set()
     for meta_path, parser in (("/robots.txt", _paths_from_robots), ("/sitemap.xml", _paths_from_sitemap)):
         try:
@@ -97,6 +114,23 @@ def run(client, endpoints: list[Endpoint]) -> list[Finding]:
             continue
         if resp.status_code < 300 and resp.text:
             discovered_paths |= parser(resp.text)
+
+    try:
+        home = client.request("GET", "/", auth_override="strip")
+    except Exception:
+        home = None
+    if home is not None and home.status_code < 300 and home.text:
+        html_paths = _paths_from_html_links(home.text)
+        discovered_paths |= {p for p in html_paths if p.startswith("/api") or p.startswith("/graphql")}
+
+        # Pull linked JS files and mine API-like route strings.
+        for script_path in [p for p in html_paths if p.endswith(".js")][:20]:
+            try:
+                script_resp = client.request("GET", script_path, auth_override="strip")
+            except Exception:
+                continue
+            if script_resp.status_code < 300 and script_resp.text:
+                discovered_paths |= _api_like_paths_from_js(script_resp.text)
 
     known_paths = {ep.path for ep in endpoints}
     for path in discovered_paths - known_paths:
@@ -117,7 +151,5 @@ def run(client, endpoints: list[Endpoint]) -> list[Finding]:
                 owasp_ref="API9:2023 Improper Inventory Management",
                 curl_repro=getattr(resp, "curl_repro", ""),
             ))
-
-    return findings
 
     return findings
