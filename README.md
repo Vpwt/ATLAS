@@ -270,7 +270,7 @@ new check:
 Ideas for extensions: GraphQL introspection abuse checks, OAuth scope
 over-permission checks, or response-time-based user enumeration detection.
 
-## Limitations (be honest about these in interviews!)
+## Limitations 
 
 - The injection check is a *smoke test*, not a replacement for a dedicated
   fuzzer like `sqlmap` — it catches obvious cases (5xx errors, leaked
