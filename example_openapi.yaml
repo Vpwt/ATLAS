@@ -1,0 +1,82 @@
+openapi: 3.0.3
+info:
+  title: Example API
+  version: "1.0"
+paths:
+  /api/profile:
+    get:
+      operationId: getProfile
+      summary: "Get the logged-in user's profile"
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+    put:
+      operationId: updateProfile
+      summary: "Update profile"
+      security:
+        - bearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            example:
+              display_name: "Test User"
+              bio: "Just testing"
+      responses:
+        "200":
+          description: OK
+
+  /api/orders/{id}:
+    get:
+      operationId: getOrder
+      summary: "Get an order by ID - test for BOLA/IDOR"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "1001"
+      responses:
+        "200":
+          description: OK
+
+  /api/search:
+    get:
+      operationId: searchProducts
+      summary: "Public search endpoint"
+      security: []
+      parameters:
+        - name: q
+          in: query
+          required: false
+          schema:
+            type: string
+            example: "laptop"
+      responses:
+        "200":
+          description: OK
+
+  /api/login:
+    post:
+      operationId: login
+      summary: "Login endpoint - test for missing rate limiting / brute force protection"
+      security: []
+      requestBody:
+        content:
+          application/json:
+            example:
+              username: "testuser"
+              password: "wrongpassword"
+      responses:
+        "200":
+          description: OK
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer

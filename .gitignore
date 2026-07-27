@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# Local scan config/output - may contain real tokens or scan results
+config.yaml
+report.html
+reports/
+
+# Editor/OS
+.vscode/
+.DS_Store

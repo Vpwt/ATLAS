@@ -1,0 +1,160 @@
+# Example configuration for the API Security Scanner.
+# Copy this to config.yaml and fill in your own API's details.
+
+base_url: "https://api.example.com"
+
+# Auth header to use for "authenticated" requests. Typically a bearer token
+# for a real, low-privilege test account you control.
+auth_header: "Bearer PASTE_YOUR_TEST_TOKEN_HERE"
+
+# Optional: a real JWT sample token (same as above, or another) used for the
+# alg=none / weak-secret checks. Leave blank to skip JWT-specific tests.
+jwt_sample_token: ""
+
+# Optional: a second, lower-privileged test account token (e.g. a regular
+# user, not an admin). Used by the `bfla` check to confirm endpoints marked
+# `admin_only: true` below actually reject non-admin callers, not just
+# unauthenticated ones.
+# low_priv_auth_header: "Bearer REGULAR_USER_TEST_TOKEN"
+
+# Verb-tampering tests try HTTP methods that were never declared for a given
+# path (e.g. sending DELETE to a path only ever configured as GET) to catch
+# missing per-method authorization checks. Off by default since it can
+# exercise destructive verbs (DELETE/PUT/PATCH) against real endpoints -
+# only enable this against a test/staging environment you're comfortable
+# writing to.
+enable_verb_tampering: false
+
+# Politeness delay between requests, in seconds. Increase if you're worried
+# about overloading the target.
+request_delay: 0.15
+
+# How many rapid requests to send when testing for missing rate limiting.
+rate_limit_burst: 25
+
+verify_tls: true
+
+# Optional: instead of (or in addition to) hand-listing `endpoints` below, point
+# this at an OpenAPI 3.x / Swagger 2.0 spec (local file path or http(s) URL,
+# JSON or YAML) to auto-discover endpoints. See example_openapi.yaml for the
+# format. Path/query params and request bodies get best-effort placeholder
+# values from the spec's examples/schemas.
+# openapi_spec: "example_openapi.yaml"
+
+# Alternative to `openapi_spec`: point this at a Postman Collection v2.x
+# export (local file path or http(s) URL) to auto-discover endpoints instead.
+# Only used if `openapi_spec` is not set.
+# postman_collection: "my_collection.postman_collection.json"
+
+# Optional: if the target exposes a GraphQL endpoint, set its path here to
+# enable the `graphql` check (introspection-enabled detection + scanning
+# discovered mutations for sensitive-sounding names like delete/admin/grant).
+# Left unset (opt-in) so the scanner never probes a path that doesn't exist.
+# graphql_endpoint: "/graphql"
+
+# Optional: instead of (or in addition to) `auth_header`, have the scanner log
+# in itself and use the returned token for every subsequent request. Useful so
+# you don't have to manually mint/paste a fresh token before every run.
+# token_field supports dot-paths (e.g. "data.token") for nested responses.
+# Set refresh_interval (seconds) to periodically re-login during long scans.
+# login:
+#   url: "/api/login"
+#   method: POST
+#   body:
+#     username: "testuser"
+#     password: "testpassword"
+#   token_field: "access_token"
+#   header_prefix: "Bearer"
+#   refresh_interval: 0
+
+# Optional: multi-step business-logic workflows to replay end-to-end, then
+# re-replay with each `required: true` step removed to check whether the flow
+# still completes (a "step can be skipped" result is a business-logic bypass,
+# e.g. completing an order without paying). `extract` pulls values out of a
+# step's JSON response (dot-path) into `{placeholders}` usable in later steps.
+# workflows:
+#   - name: "checkout_flow"
+#     steps:
+#       - name: "create_order"
+#         path: "/api/orders"
+#         method: POST
+#         body: {product_id: "123", qty: 1}
+#         extract: {order_id: "id"}
+#       - name: "pay_order"
+#         path: "/api/orders/{order_id}/pay"
+#         method: POST
+#         body: {card: "4111111111111111"}
+#         required: true
+#       - name: "complete_order"
+#         path: "/api/orders/{order_id}/complete"
+#         method: POST
+
+# When `openapi_spec` is set, entries here are merged onto the matching
+# discovered endpoint (matched by method + path) instead of replacing it -
+# handy for adding the `sample_ids` / `foreign_ids` / `id_param` fields that
+# an OpenAPI spec has no way of expressing (needed for BOLA testing). Entries
+# whose path/method aren't found in the spec are added as extra endpoints.
+# If `openapi_spec` is NOT set, this list is the full set of endpoints tested.
+endpoints:
+  # Simple authenticated GET, good candidate for auth + headers checks
+  - path: "/api/profile"
+    method: GET
+    auth_required: true
+    description: "Get the logged-in user's profile"
+
+  # Object-level endpoint with an id param - good for BOLA testing.
+  # sample_ids = objects the test account legitimately owns.
+  # foreign_ids = objects that belong to someone else (should be forbidden).
+  - path: "/api/orders/{id}"
+    method: GET
+    auth_required: true
+    id_param: "id"
+    sample_ids: ["1001"]
+    foreign_ids: ["1002", "1003"]
+    params:
+      id: "1001"
+    description: "Get an order by ID - test for BOLA/IDOR"
+
+  # Endpoint with query params - good for injection testing
+  - path: "/api/search"
+    method: GET
+    auth_required: false
+    params:
+      q: "laptop"
+    description: "Public search endpoint"
+
+  # Write endpoint - good for mass assignment testing
+  - path: "/api/profile"
+    method: PUT
+    auth_required: true
+    body:
+      display_name: "Test User"
+      bio: "Just testing"
+    description: "Update profile - test for mass assignment"
+
+  # Login endpoint - good candidate for rate limiting checks
+  - path: "/api/login"
+    method: POST
+    auth_required: false
+    body:
+      username: "testuser"
+      password: "wrongpassword"
+    description: "Login endpoint - test for missing rate limiting / brute force protection"
+
+  # Endpoint that should only be reachable by an admin - good for BFLA testing.
+  # Checked with no auth, and (if low_priv_auth_header is set) with a regular
+  # user's token too; both should be rejected with 401/403.
+  - path: "/api/admin/users"
+    method: GET
+    auth_required: true
+    admin_only: true
+    description: "Admin-only endpoint - test for Broken Function Level Authorization"
+
+  # Webhook/callback-style field - good for SSRF testing (params/body fields
+  # named url/uri/link/callback/webhook/etc. are automatically probed).
+  - path: "/api/webhooks"
+    method: POST
+    auth_required: true
+    body:
+      callback_url: "https://example.com/notify"
+    description: "Register a webhook callback URL - test for SSRF"
