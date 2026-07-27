@@ -48,7 +48,14 @@ def print_console_summary(findings: list[Finding], base_url: str):
         print()
 
 
-def write_html_report(findings: list[Finding], base_url: str, output_path: str, endpoints: list = None, risk_summary: dict | None = None):
+def write_html_report(
+    findings: list[Finding],
+    base_url: str,
+    output_path: str,
+    endpoints: list = None,
+    risk_summary: dict | None = None,
+    assurance_summary: dict | None = None,
+):
     findings_sorted = sorted(findings, key=lambda f: severity_rank(f.severity))
     counts = {}
     for f in findings_sorted:
@@ -66,10 +73,10 @@ def write_html_report(findings: list[Finding], base_url: str, output_path: str, 
           <td><code>{_esc(f.endpoint)}</code></td>
           <td>{_esc(f.check)}</td>
           <td>{_esc(f.owasp_ref)}</td>
-                    <td>{_esc(f.cwe)}</td>
+          <td>{_esc(f.cwe)}</td>
           <td>{_esc(f.detail)}</td>
-                    <td>{_esc(f.remediation)}</td>
-                    <td>{_esc(f.exploit_hint)}</td>
+          <td>{_esc(f.remediation)}</td>
+          <td>{_esc(f.exploit_hint)}</td>
           <td><code>{_esc(f.evidence)}</code></td>
           <td>{poc_cell}</td>
         </tr>""")
@@ -118,11 +125,25 @@ def write_html_report(findings: list[Finding], base_url: str, output_path: str, 
   <h2>Executive Dashboard</h2>
   <div class="risk-card">
     <div><strong>Risk Score:</strong> {risk_summary.get('risk_score', 0)}/100</div>
-    <div><strong>Critical:</strong> {risk_summary.get('counts', {}).get('CRITICAL', 0)} &nbsp; 
+    <div><strong>Critical:</strong> {risk_summary.get('counts', {}).get('CRITICAL', 0)} &nbsp;
          <strong>High:</strong> {risk_summary.get('counts', {}).get('HIGH', 0)} &nbsp;
          <strong>Medium:</strong> {risk_summary.get('counts', {}).get('MEDIUM', 0)}</div>
   </div>
   {('<h3>Correlated Attack Chains</h3><ul>' + chains_html + '</ul>') if chains_html else '<p class="graph-note">No correlated attack chains detected from current findings.</p>'}
+"""
+
+    assurance_html = ""
+    if assurance_summary:
+        assurance_html = f"""
+    <h2>Assurance Mode</h2>
+    <div class="risk-card">
+        <div><strong>Confidence Score:</strong> {assurance_summary.get('confidence_score', 0)}/100</div>
+        <div><strong>Observed Endpoint Coverage:</strong> {assurance_summary.get('coverage_percent', 0)}%</div>
+        <div><strong>Mathematical Guarantee:</strong> true high/critical endpoint rate &le; {assurance_summary.get('proof_upper_bound_fail_percent', 100)}% with {assurance_summary.get('proof_confidence_percent', 95)}% confidence</div>
+        <div><strong>Model:</strong> {_esc(assurance_summary.get('proof_model', ''))}</div>
+        <div><strong>Assumptions:</strong> {_esc(assurance_summary.get('proof_assumptions', ''))}</div>
+        <div><strong>Assessment:</strong> {_esc(assurance_summary.get('stance', ''))}</div>
+    </div>
 """
 
     html = f"""<!DOCTYPE html>
@@ -140,12 +161,12 @@ def write_html_report(findings: list[Finding], base_url: str, output_path: str, 
   table {{ border-collapse: collapse; width: 100%; font-size: 0.85rem; margin-bottom: 1rem; }}
   th, td {{ text-align: left; padding: 0.5rem 0.6rem; border-bottom: 1px solid #262b33; vertical-align: top; }}
   th {{ background: #1a1e26; position: sticky; top: 0; }}
-    .risk-card {{ background: #121722; border: 1px solid #262b33; border-radius: 8px; padding: 0.75rem; margin-bottom: 1rem; }}
+  .risk-card {{ background: #121722; border: 1px solid #262b33; border-radius: 8px; padding: 0.75rem; margin-bottom: 1rem; }}
   code {{ background: #1a1e26; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.8rem; word-break: break-all; }}
   .no-findings {{ color: #9ca3af; padding: 2rem; text-align: center; }}
-    .graph-wrap {{ background: #121722; border: 1px solid #262b33; border-radius: 8px; padding: 0.75rem; margin-bottom: 1rem; }}
-    .graph-note {{ color: #9ca3af; font-size: 0.8rem; margin: 0.25rem 0 0; }}
-    details summary {{ cursor: pointer; color: #cbd5e1; font-size: 0.85rem; }}
+  .graph-wrap {{ background: #121722; border: 1px solid #262b33; border-radius: 8px; padding: 0.75rem; margin-bottom: 1rem; }}
+  .graph-note {{ color: #9ca3af; font-size: 0.8rem; margin: 0.25rem 0 0; }}
+  details summary {{ cursor: pointer; color: #cbd5e1; font-size: 0.85rem; }}
 </style>
 <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
 <script>if(window.mermaid){{mermaid.initialize({{startOnLoad:true, theme:'dark'}});}}</script>
@@ -154,8 +175,9 @@ def write_html_report(findings: list[Finding], base_url: str, output_path: str, 
   <h1>API Security Scan Report</h1>
   <div class="meta">Target: {_esc(base_url)} &middot; Generated: {datetime.now().isoformat(timespec='seconds')}</div>
   <div class="summary">{summary_badges if counts else '<span class="badge" style="background:#166534">No findings</span>'}</div>
-    {risk_html}
-    {"<table><thead><tr><th>Severity</th><th>CVSS</th><th>Title</th><th>Endpoint</th><th>Check</th><th>OWASP Ref</th><th>CWE</th><th>Detail</th><th>Remediation</th><th>Exploit Assistant</th><th>Evidence</th><th>PoC (curl)</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table>" if rows else '<div class="no-findings">No issues found by the checks that ran.</div>'}
+  {risk_html}
+  {assurance_html}
+  {"<table><thead><tr><th>Severity</th><th>CVSS</th><th>Title</th><th>Endpoint</th><th>Check</th><th>OWASP Ref</th><th>CWE</th><th>Detail</th><th>Remediation</th><th>Exploit Assistant</th><th>Evidence</th><th>PoC (curl)</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table>" if rows else '<div class="no-findings">No issues found by the checks that ran.</div>'}
   {inventory_html}
 </body>
 </html>"""

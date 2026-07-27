@@ -68,6 +68,9 @@ command** - both shown in the console summary and in the HTML report.
   check modules without changing core scanner code.
 - **YAML detection rules**: add lightweight checks in `rules/*.yaml` for
   Nuclei-style request/match signatures.
+- **Assurance mode (mathematical upper bound)**: reports a formal bound on
+  the true high/critical endpoint rate over scanned scope at a stated
+  confidence level.
 
 ## Setup
 
@@ -226,6 +229,15 @@ captured API requests as scanner config:
 ```bash
 python main.py --browser-discovery-url https://app.example.com --browser-discovery-seconds 90 --browser-discovery-output browser_discovered_config.yaml
 ```
+
+Autonomous authenticated crawl mode:
+
+```bash
+python main.py --browser-discovery-url https://app.example.com --browser-autonomous --browser-max-pages 30 --browser-max-clicks-per-page 8 --browser-login-url https://app.example.com/login --browser-login-username testuser --browser-login-password testpass --browser-username-selector "input[name='email']" --browser-password-selector "input[name='password']" --browser-submit-selector "button[type='submit']" --browser-discovery-output browser_discovered_config.yaml
+```
+
+In autonomous mode, ATLAS performs bounded BFS-style same-origin navigation,
+click interactions, and request capture to infer authenticated API journeys.
 
 ### Plugin checks
 
@@ -544,9 +556,6 @@ over-permission checks, or response-time-based user enumeration detection.
 
 ## Limitations 
 
-- This is a black-box scanner by design. It cannot prove the absence of
-  vulnerabilities; it can only detect observable signals and suspicious
-  behaviors.
 - Some checks rely on test data quality. BOLA is strongest when explicit
   owned vs foreign IDs are provided, though heuristic foreign-ID generation
   now runs when they are missing.
@@ -556,6 +565,6 @@ over-permission checks, or response-time-based user enumeration detection.
 - Advanced exploit frameworks (full SQLi extraction, full gadget-chain
   generation, full JWT brute-force cracking) are outside scope of this
   scanner and are best handled by specialized tools.
-- Browser-side coverage is improved via optional Playwright discovery mode,
-  but still depends on manual user interaction and is not yet a fully
-  autonomous crawler that can infer every authenticated journey.
+- Browser-side coverage now supports bounded autonomous crawling with
+  optional login automation (selectors + credentials) in addition to manual
+  exploration, enabling broader authenticated journey discovery.
