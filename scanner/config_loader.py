@@ -79,6 +79,16 @@ def load_config(path: str) -> dict:
         "base_url": raw["base_url"],
         "auth_header": raw.get("auth_header"),   # e.g. "Bearer abc123"
         "jwt_sample_token": raw.get("jwt_sample_token"),
+        # Optional public key material for the JWT check's RS256->HS256
+        # algorithm-confusion attack: either paste the PEM directly
+        # (jwt_public_key) or point at a JWKS endpoint to fetch it from
+        # (jwks_url). Not needed for HS256-signed tokens.
+        "jwt_public_key": raw.get("jwt_public_key"),
+        "jwks_url": raw.get("jwks_url"),
+        # Optional attacker-controlled callback/collaborator URL (e.g. a
+        # webhook.site URL) used by the ssrf check to confirm true
+        # out-of-band SSRF when the HTTP response gives no visible signal.
+        "ssrf_callback_url": raw.get("ssrf_callback_url"),
         # Optional automated login: instead of pasting a static auth_header,
         # perform a login request and extract a bearer token from it. See
         # scanner/auth_flow.py for the expected fields.

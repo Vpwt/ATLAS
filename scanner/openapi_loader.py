@@ -65,6 +65,27 @@ def _example_value_for_schema(spec: dict, schema: dict, _depth: int = 0) -> Any:
     if schema.get("enum"):
         return schema["enum"][0]
 
+    # allOf: schema composition - merge every subschema's example together
+    # (this is how OpenAPI expresses "inherits from" / mixins).
+    if schema.get("allOf"):
+        merged: Any = {}
+        for sub in schema["allOf"]:
+            sub_resolved = _resolve_ref(spec, sub["$ref"]) if isinstance(sub, dict) and "$ref" in sub else sub
+            value = _example_value_for_schema(spec, sub_resolved, _depth + 1)
+            if isinstance(value, dict) and isinstance(merged, dict):
+                merged.update(value)
+            elif not merged:
+                merged = value
+        return merged
+
+    # oneOf/anyOf: schema is exactly one of / any of several alternatives -
+    # best-effort, just use the first alternative as a representative example.
+    for key in ("oneOf", "anyOf"):
+        if schema.get(key):
+            first = schema[key][0]
+            first_resolved = _resolve_ref(spec, first["$ref"]) if isinstance(first, dict) and "$ref" in first else first
+            return _example_value_for_schema(spec, first_resolved, _depth + 1)
+
     schema_type = schema.get("type")
     if schema_type == "object" or "properties" in schema:
         return {
@@ -89,6 +110,24 @@ def _example_value_for_schema(spec: dict, schema: dict, _depth: int = 0) -> Any:
     return "test"
 
 
+def _pick_content_entry(content: dict) -> Optional[dict]:
+    """Picks which media-type entry in a `content:` map to derive an example
+    body from. Prefers JSON media types (including '+json' suffixes like
+    'application/vnd.api+json'), then form-encoded media types (whose fields
+    are still expressible as a flat key/value dict), then falls back to
+    whatever's listed first so unusual/custom media types still get a
+    best-effort example instead of being skipped entirely."""
+    if not content:
+        return None
+    for name, entry in content.items():
+        if name == "application/json" or name.endswith("+json"):
+            return entry
+    for name, entry in content.items():
+        if name in ("application/x-www-form-urlencoded", "multipart/form-data"):
+            return entry
+    return next(iter(content.values()), None)
+
+
 def _request_body_example(spec: dict, operation: dict) -> Optional[dict]:
     """Best-effort JSON body example for an operation (OpenAPI 3.x requestBody)."""
     request_body = operation.get("requestBody")
@@ -98,7 +137,7 @@ def _request_body_example(spec: dict, operation: dict) -> Optional[dict]:
         return None
 
     content = request_body.get("content", {})
-    json_content = content.get("application/json") or next(iter(content.values()), None)
+    json_content = _pick_content_entry(content)
     if not isinstance(json_content, dict):
         return None
 

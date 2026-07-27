@@ -124,7 +124,9 @@ def main():
             if check_name == "rate_limit":
                 findings = fn(client, endpoints, burst_count=config.get("rate_limit_burst", 25))
             elif check_name == "jwt":
-                findings = fn(client, endpoints, jwt_sample_token=config.get("jwt_sample_token"))
+                findings = fn(client, endpoints, jwt_sample_token=config.get("jwt_sample_token"),
+                              jwt_public_key=config.get("jwt_public_key"),
+                              jwks_url=config.get("jwks_url"))
             elif check_name == "bfla":
                 findings = fn(client, endpoints,
                               low_priv_auth_header=config.get("low_priv_auth_header"),
@@ -133,6 +135,8 @@ def main():
                 findings = fn(client, endpoints, graphql_path=config.get("graphql_endpoint"))
             elif check_name == "business_logic":
                 findings = fn(client, config.get("workflows", []))
+            elif check_name == "ssrf":
+                findings = fn(client, endpoints, ssrf_callback_url=config.get("ssrf_callback_url"))
             else:
                 findings = fn(client, endpoints)
         except Exception as e:

