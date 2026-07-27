@@ -34,7 +34,13 @@ def print_console_summary(findings: list[Finding], base_url: str):
         print(f"   CVSS:     {f.cvss_score}")
         if f.owasp_ref:
             print(f"   OWASP:    {f.owasp_ref}")
+        if f.cwe:
+            print(f"   CWE:      {f.cwe}")
         print(f"   Detail:   {f.detail}")
+        if f.remediation:
+            print(f"   Fix:      {f.remediation}")
+        if f.exploit_hint:
+            print(f"   Next try: {f.exploit_hint}")
         if f.evidence:
             print(f"   Evidence: {f.evidence}")
         if f.curl_repro:
@@ -42,7 +48,7 @@ def print_console_summary(findings: list[Finding], base_url: str):
         print()
 
 
-def write_html_report(findings: list[Finding], base_url: str, output_path: str, endpoints: list = None):
+def write_html_report(findings: list[Finding], base_url: str, output_path: str, endpoints: list = None, risk_summary: dict | None = None):
     findings_sorted = sorted(findings, key=lambda f: severity_rank(f.severity))
     counts = {}
     for f in findings_sorted:
@@ -60,7 +66,10 @@ def write_html_report(findings: list[Finding], base_url: str, output_path: str, 
           <td><code>{_esc(f.endpoint)}</code></td>
           <td>{_esc(f.check)}</td>
           <td>{_esc(f.owasp_ref)}</td>
+                    <td>{_esc(f.cwe)}</td>
           <td>{_esc(f.detail)}</td>
+                    <td>{_esc(f.remediation)}</td>
+                    <td>{_esc(f.exploit_hint)}</td>
           <td><code>{_esc(f.evidence)}</code></td>
           <td>{poc_cell}</td>
         </tr>""")
@@ -85,14 +94,35 @@ def write_html_report(findings: list[Finding], base_url: str, output_path: str, 
           <td>{_esc(ep.description)}</td>
         </tr>""")
 
-        inventory_html = ""
-        if inventory_rows:
-                graph_html = _build_attack_surface_graph(endpoints or [])
-                inventory_html = f"""
+    inventory_html = ""
+    if inventory_rows:
+        graph_html = _build_attack_surface_graph(endpoints or [], findings_sorted)
+        inventory_html = f"""
     <h2>Attack surface (endpoints tested)</h2>
     {graph_html}
     <table><thead><tr><th>Method</th><th>Path</th><th>Flags</th><th>Description</th></tr></thead>
     <tbody>{"".join(inventory_rows)}</tbody></table>
+"""
+
+    risk_html = ""
+    if risk_summary:
+        chains_html = ""
+        for ch in risk_summary.get("attack_chains", []):
+            chains_html += (
+                f"<li><strong>{_esc(ch.get('severity', ''))}:</strong> {_esc(ch.get('name', ''))}"
+                f"<br>{_esc(' -> '.join(ch.get('steps', [])))}"
+                f"<br><em>{_esc(ch.get('impact', ''))}</em></li>"
+            )
+
+        risk_html = f"""
+  <h2>Executive Dashboard</h2>
+  <div class="risk-card">
+    <div><strong>Risk Score:</strong> {risk_summary.get('risk_score', 0)}/100</div>
+    <div><strong>Critical:</strong> {risk_summary.get('counts', {}).get('CRITICAL', 0)} &nbsp; 
+         <strong>High:</strong> {risk_summary.get('counts', {}).get('HIGH', 0)} &nbsp;
+         <strong>Medium:</strong> {risk_summary.get('counts', {}).get('MEDIUM', 0)}</div>
+  </div>
+  {('<h3>Correlated Attack Chains</h3><ul>' + chains_html + '</ul>') if chains_html else '<p class="graph-note">No correlated attack chains detected from current findings.</p>'}
 """
 
     html = f"""<!DOCTYPE html>
@@ -110,6 +140,7 @@ def write_html_report(findings: list[Finding], base_url: str, output_path: str, 
   table {{ border-collapse: collapse; width: 100%; font-size: 0.85rem; margin-bottom: 1rem; }}
   th, td {{ text-align: left; padding: 0.5rem 0.6rem; border-bottom: 1px solid #262b33; vertical-align: top; }}
   th {{ background: #1a1e26; position: sticky; top: 0; }}
+    .risk-card {{ background: #121722; border: 1px solid #262b33; border-radius: 8px; padding: 0.75rem; margin-bottom: 1rem; }}
   code {{ background: #1a1e26; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.8rem; word-break: break-all; }}
   .no-findings {{ color: #9ca3af; padding: 2rem; text-align: center; }}
     .graph-wrap {{ background: #121722; border: 1px solid #262b33; border-radius: 8px; padding: 0.75rem; margin-bottom: 1rem; }}
@@ -123,7 +154,8 @@ def write_html_report(findings: list[Finding], base_url: str, output_path: str, 
   <h1>API Security Scan Report</h1>
   <div class="meta">Target: {_esc(base_url)} &middot; Generated: {datetime.now().isoformat(timespec='seconds')}</div>
   <div class="summary">{summary_badges if counts else '<span class="badge" style="background:#166534">No findings</span>'}</div>
-  {"<table><thead><tr><th>Severity</th><th>CVSS</th><th>Title</th><th>Endpoint</th><th>Check</th><th>OWASP Ref</th><th>Detail</th><th>Evidence</th><th>PoC (curl)</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table>" if rows else '<div class="no-findings">No issues found by the checks that ran.</div>'}
+    {risk_html}
+    {"<table><thead><tr><th>Severity</th><th>CVSS</th><th>Title</th><th>Endpoint</th><th>Check</th><th>OWASP Ref</th><th>CWE</th><th>Detail</th><th>Remediation</th><th>Exploit Assistant</th><th>Evidence</th><th>PoC (curl)</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table>" if rows else '<div class="no-findings">No issues found by the checks that ran.</div>'}
   {inventory_html}
 </body>
 </html>"""
@@ -148,12 +180,20 @@ def _safe_node_id(value: str) -> str:
     return "".join(chars)[:80] or "node"
 
 
-def _build_attack_surface_graph(endpoints: list) -> str:
+def _build_attack_surface_graph(endpoints: list, findings: list[Finding]) -> str:
     if not endpoints:
         return ""
 
     lines = ["flowchart LR", "  root[\"API\"]"]
     method_nodes = {}
+
+    endpoint_severity = {}
+    sev_weight = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "INFO": 0}
+    for finding in findings:
+        endpoint_severity[finding.endpoint] = max(
+            sev_weight.get(finding.severity.value, 0),
+            endpoint_severity.get(finding.endpoint, 0),
+        )
 
     for ep in endpoints:
         method = (ep.method or "GET").upper()
@@ -167,6 +207,12 @@ def _build_attack_surface_graph(endpoints: list) -> str:
         endpoint_id = f"e_{_safe_node_id(method + '_' + ep.path)}"
         lines.append(f"  {endpoint_id}[\"{path_label}\"]")
         lines.append(f"  {method_id} --> {endpoint_id}")
+        ep_label = f"{method} {ep.path}"
+        weight = endpoint_severity.get(ep_label, 0)
+        if weight >= 3:
+            lines.append(f"  style {endpoint_id} fill:#7f1d1d,stroke:#ef4444,color:#ffffff")
+        elif weight == 2:
+            lines.append(f"  style {endpoint_id} fill:#7c2d12,stroke:#f59e0b,color:#ffffff")
 
     mermaid_text = "\n".join(lines)
     return (

@@ -1,0 +1,4 @@
+id: example_oauth_scanner
+description: Example external plugin check scaffold
+entrypoint: plugin.py
+function: run

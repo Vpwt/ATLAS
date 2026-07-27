@@ -1,4 +1,7 @@
 requests>=2.31.0
+httpx>=0.27.0
 PyYAML>=6.0
 PyJWT>=2.8.0
 cryptography>=41.0.0
+# Optional but recommended for browser API discovery mode.
+playwright>=1.55.0

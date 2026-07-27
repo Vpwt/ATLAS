@@ -3,6 +3,7 @@ import yaml
 from scanner.models import Endpoint
 from scanner.openapi_loader import load_endpoints_from_spec
 from scanner.postman_loader import load_endpoints_from_postman
+from scanner.traffic_import_loader import load_endpoints_from_traffic_export
 
 
 def _endpoint_from_raw(ep_raw: dict) -> Endpoint:
@@ -56,11 +57,14 @@ def load_config(path: str) -> dict:
     endpoint_overrides = raw.get("endpoints", []) or []
     spec_source = raw.get("openapi_spec")
     postman_source = raw.get("postman_collection")
+    traffic_import = raw.get("traffic_import")
 
     if spec_source:
         discovered = load_endpoints_from_spec(spec_source)
     elif postman_source:
         discovered = load_endpoints_from_postman(postman_source)
+    elif traffic_import:
+        discovered = load_endpoints_from_traffic_export(traffic_import)
     else:
         discovered = None
 
@@ -81,6 +85,7 @@ def load_config(path: str) -> dict:
     return {
         "base_url": raw["base_url"],
         "auth_header": raw.get("auth_header"),   # e.g. "Bearer abc123"
+        "session_cookie": raw.get("session_cookie", ""),
         "jwt_sample_token": raw.get("jwt_sample_token"),
         # Optional public key material for the JWT check's RS256->HS256
         # algorithm-confusion attack: either paste the PEM directly
@@ -98,6 +103,13 @@ def load_config(path: str) -> dict:
         # perform a login request and extract a bearer token from it. See
         # scanner/auth_flow.py for the expected fields.
         "login": raw.get("login"),
+        # Optional advanced auth providers for enterprise targets.
+        "oauth2": raw.get("oauth2"),
+        "azure_ad": raw.get("azure_ad"),
+        "okta": raw.get("okta"),
+        "keycloak": raw.get("keycloak"),
+        "aws_sigv4": raw.get("aws_sigv4"),
+        "mtls": raw.get("mtls"),
         # Optional GraphQL endpoint (e.g. "/graphql") to run introspection /
         # sensitive-mutation-discovery checks against. Off by default.
         "graphql_endpoint": raw.get("graphql_endpoint"),
@@ -117,5 +129,6 @@ def load_config(path: str) -> dict:
         "request_delay": raw.get("request_delay", 0.1),
         "rate_limit_burst": raw.get("rate_limit_burst", 25),
         "verify_tls": raw.get("verify_tls", True),
+        "traffic_import": traffic_import,
         "endpoints": endpoints,
     }

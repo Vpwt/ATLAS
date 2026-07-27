@@ -34,6 +34,13 @@ rate_limit_burst: 25
 
 verify_tls: true
 
+# Optional: external plugin checks (plugin.yaml + plugin.py) are auto-loaded
+# from the CLI's --plugins-dir path (default: ./plugins). Keep this enabled to
+# extend scanner capabilities without touching core code.
+
+# Optional: YAML detection rules are auto-loaded from --rules-dir (default:
+# ./rules). Rule syntax example is in rules/weak-password-reset.yaml.
+
 # Optional: instead of (or in addition to) hand-listing `endpoints` below, point
 # this at an OpenAPI 3.x / Swagger 2.0 spec (local file path or http(s) URL,
 # JSON or YAML) to auto-discover endpoints. See example_openapi.yaml for the
@@ -46,11 +53,59 @@ verify_tls: true
 # Only used if `openapi_spec` is not set.
 # postman_collection: "my_collection.postman_collection.json"
 
+# Optional: import endpoints from observed traffic exports (HAR or JSON-style
+# Burp/ZAP/mitmproxy/Chrome exports). Used only when openapi_spec and
+# postman_collection are both unset.
+# traffic_import: "capture.har"
+
 # Optional: if the target exposes a GraphQL endpoint, set its path here to
 # enable the `graphql` check (introspection-enabled detection + scanning
 # discovered mutations for sensitive-sounding names like delete/admin/grant).
 # Left unset (opt-in) so the scanner never probes a path that doesn't exist.
 # graphql_endpoint: "/graphql"
+
+# Optional generic OAuth2 modes:
+# oauth2:
+#   mode: client_credentials  # client_credentials | device_flow | pkce
+#   token_url: "https://idp.example.com/oauth2/token"
+#   client_id: "scanner-client"
+#   client_secret: "scanner-secret"
+#   scope: "api.read"
+
+# Optional provider shortcuts:
+# azure_ad:
+#   tenant_id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+#   client_id: "scanner-client-id"
+#   client_secret: "scanner-client-secret"
+#   scope: "https://graph.microsoft.com/.default"
+
+# okta:
+#   issuer: "https://dev-123456.okta.com/oauth2/default"
+#   client_id: "scanner-client-id"
+#   client_secret: "scanner-client-secret"
+#   scope: "custom.scope"
+
+# keycloak:
+#   issuer: "https://sso.example.com/realms/myrealm"
+#   client_id: "scanner-client-id"
+#   client_secret: "scanner-client-secret"
+#   scope: "openid"
+
+# Optional AWS SigV4 request signing for API Gateway/IAM auth
+# aws_sigv4:
+#   access_key: "AKIA..."
+#   secret_key: "..."
+#   region: "us-east-1"
+#   service: "execute-api"
+#   session_token: ""  # optional
+
+# Optional mTLS client certificate
+# mtls:
+#   cert_file: "client.crt"
+#   key_file: "client.key"
+
+# Optional cookie-based auth
+# session_cookie: "SESSIONID=..."
 
 # Optional: instead of (or in addition to) `auth_header`, have the scanner log
 # in itself and use the returned token for every subsequent request. Useful so

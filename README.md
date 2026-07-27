@@ -1,9 +1,13 @@
-# API Security Scanner
+# ATLAS - API Threat & Logic Analysis Suite
 
-A lightweight Python scanner that probes a REST API for common issues aligned
+A lightweight Python scanner suite that probes a REST API for common issues aligned
 with the [OWASP API Security Top 10](https://owasp.org/API-Security/editions/2023/en/0x11-t10/).
 Built as a portfolio/learning project for testing APIs you own or are
 explicitly authorized to test.
+
+ATLAS includes an async scan engine, reverse-proxy traffic capture, Playwright
+browser API discovery, external plugin loading, and YAML-defined detection
+rules for lower-friction extension.
 
 ## ⚠️ Authorization required
 
@@ -42,6 +46,7 @@ extra checks that don't map to a single category:
 | `graphql` | API9/API5/API4 Improper Inventory Management / Broken Function Level Authorization / Unrestricted Resource Consumption | Opt-in (`graphql_endpoint`): runs a standard introspection query, flags introspection being enabled, flags sensitive-sounding mutation names (delete/admin/grant/impersonate/...), probes for a query depth/complexity DoS vector, and probes for alias-based batching/rate-limit-bypass |
 | `business_logic` | API6 Unrestricted Access to Sensitive Business Flows | Opt-in (`workflows`): replays configured flows, tests step-skipping and bounded step-reordering permutations; depth/combination limits are configurable |
 | `unsafe_consumption` | API10 Unsafe Consumption of APIs | Heuristic checks for risky upstream-target handling by injecting internal/suspicious URLs into URL-like fields and looking for acceptance or leaked upstream failure details |
+| `fuzzing` | API8 Security Misconfiguration | Mutation-based payload fuzzing for write endpoints (nested/array/unicode/integer/content-confusion) to surface parser and validation weaknesses |
 
 API10 is included as a heuristic black-box check (`unsafe_consumption`).
 For strict assurance, pair it with internal architecture/testing data.
@@ -49,10 +54,31 @@ For strict assurance, pair it with internal architecture/testing data.
 Every finding also carries a `cvss_score` (derived from severity) and, where
 a live HTTP request produced it, a ready-to-run `curl` **PoC/reproduction
 command** - both shown in the console summary and in the HTML report.
+
+## New foundation capabilities
+
+- **Async engine (`httpx` + `asyncio`)**: checks can now run concurrently
+  (`--engine async`) with bounded parallelism (`--check-concurrency N`) for
+  significantly lower wall-clock time on large endpoint sets.
+- **Proxy capture mode**: run scanner as a reverse proxy to capture live API
+  traffic and auto-generate a ready-to-scan config file.
+- **Browser discovery mode**: launch Playwright, log in manually, click
+  through the app, and auto-capture observed API endpoints into config.
+- **Plugin system**: drop `plugin.yaml` + `plugin.py` in `plugins/` to add
+  check modules without changing core scanner code.
+- **YAML detection rules**: add lightweight checks in `rules/*.yaml` for
+  Nuclei-style request/match signatures.
+
 ## Setup
 
 ```bash
 pip install -r requirements.txt
+```
+
+For browser discovery mode, install browser binaries once:
+
+```bash
+playwright install
 ```
 
 ## Usage
@@ -95,12 +121,167 @@ python main.py --config config.yaml --yes
 
 # Custom report path
 python main.py --config config.yaml --output reports/scan_2026_07_27.html
+
+# Async engine with higher check-level concurrency
+python main.py --config config.yaml --engine async --check-concurrency 8
+
+# Enterprise exports
+python main.py --config config.yaml --export-json report.json --export-csv report.csv --export-junit report.junit.xml --export-sarif report.sarif
+
+# Differential scan snapshot + comparison
+python main.py --config config.yaml --snapshot-file scan_046.json --diff-against scan_045.json --diff-output diff_045_046.json
 ```
+
+### Traffic export import (HAR/Burp/ZAP/mitmproxy/Chrome)
+
+Set `traffic_import` in config to use observed traffic as an endpoint source
+(used when `openapi_spec` and `postman_collection` are not set):
+
+```yaml
+traffic_import: "capture.har"
+```
+
+Supported inputs:
+
+- HAR (`.har`)
+- JSON-style exports from Burp/ZAP/mitmproxy/Chrome DevTools (best effort)
+
+### Smarter authentication options
+
+In addition to `auth_header` and `login`, you can configure advanced auth:
+
+```yaml
+# Generic OAuth2 client credentials
+oauth2:
+  mode: client_credentials
+  token_url: "https://idp.example.com/oauth2/token"
+  client_id: "scanner-client"
+  client_secret: "scanner-secret"
+  scope: "api.read api.write"
+
+# OAuth2 device flow (interactive)
+# oauth2:
+#   mode: device_flow
+#   device_authorization_url: "https://idp.example.com/oauth2/device_authorization"
+#   token_url: "https://idp.example.com/oauth2/token"
+#   client_id: "scanner-client"
+#   scope: "api.read"
+
+# OAuth2 PKCE (interactive)
+# oauth2:
+#   mode: pkce
+#   authorize_url: "https://idp.example.com/oauth2/authorize"
+#   token_url: "https://idp.example.com/oauth2/token"
+#   client_id: "scanner-client"
+#   redirect_uri: "http://localhost/callback"
+#   scope: "openid profile api.read"
+
+# AWS Signature V4 signing
+# aws_sigv4:
+#   access_key: "AKIA..."
+#   secret_key: "..."
+#   region: "us-east-1"
+#   service: "execute-api"
+#   session_token: ""  # optional
+
+# mTLS
+# mtls:
+#   cert_file: "client.crt"
+#   key_file: "client.key"
+
+# Session cookie-based auth
+# session_cookie: "SESSIONID=..."
+```
+
+Provider shortcuts:
+
+- `azure_ad` (tenant/client config -> OAuth token endpoints)
+- `okta` (issuer/client config)
+- `keycloak` (issuer/client config)
 
 Available check names: `auth`, `bola`, `bfla`, `injection`, `ssrf`,
 `rate_limit`, `headers`, `http_methods`, `mass_assignment`,
 `excessive_data_exposure`, `jwt`, `error_disclosure`, `api_inventory`,
-`graphql`, `business_logic`, `unsafe_consumption`.
+`graphql`, `business_logic`, `unsafe_consumption`, `fuzzing`, plus dynamically loaded
+plugin check IDs and `yaml_rules` (when rules are present).
+
+### Proxy capture mode
+
+Run scanner as a reverse proxy between your client and API, then stop with
+`Ctrl+C` to generate config automatically:
+
+```bash
+python main.py --proxy-mode --base-url https://api.example.com --proxy-port 8081 --proxy-output captured_config.yaml
+```
+
+Then point your app/client at `http://127.0.0.1:8081` and exercise login +
+business flows. Generated config includes discovered methods/paths, params,
+sample JSON bodies, and captured authorization header when observed.
+
+### Browser discovery mode (Playwright)
+
+Open a real browser, authenticate manually, click through the app, and export
+captured API requests as scanner config:
+
+```bash
+python main.py --browser-discovery-url https://app.example.com --browser-discovery-seconds 90 --browser-discovery-output browser_discovered_config.yaml
+```
+
+### Plugin checks
+
+By default scanner loads plugins from `plugins/`.
+
+Plugin layout:
+
+```text
+plugins/
+  your_plugin/
+    plugin.yaml
+    plugin.py
+```
+
+Minimal `plugin.yaml`:
+
+```yaml
+id: your_plugin_id
+entrypoint: plugin.py
+function: run
+```
+
+`run(client, endpoints, **kwargs) -> list[Finding]` should be implemented in
+`plugin.py`.
+
+Disable plugins if needed:
+
+```bash
+python main.py --config config.yaml --disable-plugins
+```
+
+### YAML detection rules
+
+Rules in `rules/*.yaml` are loaded automatically and executed by the
+`yaml_rules` check.
+
+Example rule:
+
+```yaml
+id: weak-password-reset
+title: Password reset endpoint accepted test request
+severity: HIGH
+request:
+  method: POST
+  path: /reset
+  body:
+    email: test@example.com
+match:
+  status: 200
+```
+
+Disable rule loading if needed:
+
+```bash
+python main.py --config config.yaml --disable-rules
+```
 
 ## Config reference (key fields)
 
@@ -296,19 +477,33 @@ the spec is added as an extra endpoint. If `openapi_spec` is *not* set,
 ## Project structure
 
 ```
-api_security_scanner/
+atlas/
 ├── main.py                    # CLI entry point
 ├── example_config.yaml        # Copy this to config.yaml and edit
 ├── example_openapi.yaml       # Sample OpenAPI spec for endpoint auto-discovery
 ├── requirements.txt
+├── plugins/                   # Optional external check modules
+├── rules/                     # Optional YAML detection rules
 └── scanner/
     ├── models.py               # Endpoint / Finding data classes (+ CVSS scoring)
-    ├── http_client.py          # requests wrapper (auth stripping, delays, curl PoC capture, token refresh hook)
+    ├── http_client.py          # httpx sync/async client wrappers (+ curl PoC capture)
+    ├── async_engine.py         # asyncio-based concurrent check orchestration
     ├── config_loader.py        # YAML -> config/Endpoint objects
     ├── openapi_loader.py       # OpenAPI/Swagger spec -> Endpoint objects
     ├── postman_loader.py       # Postman Collection v2.x export -> Endpoint objects
+    ├── traffic_import_loader.py # HAR/Burp/ZAP/mitm/Chrome export -> Endpoint objects
     ├── graphql_loader.py       # GraphQL introspection query + schema summarization
     ├── auth_flow.py            # Automated login + periodic token refresh
+    ├── advanced_auth.py       # OAuth2/PKCE/device-flow/SigV4/mTLS runtime helpers
+    ├── plugin_loader.py       # External plugin discovery/loading
+    ├── rule_engine.py         # YAML detection rule loader/executor
+    ├── proxy_mode.py          # Reverse-proxy traffic capture -> generated config
+    ├── browser_discovery.py   # Playwright endpoint discovery
+    ├── risk_engine.py         # Risk scoring + attack-chain correlation
+    ├── ai_assist.py           # CWE/remediation/exploit guidance enrichment
+    ├── diff_scan.py           # Snapshot + differential scan comparison
+    ├── exporters.py           # JSON/CSV/JUnit/SARIF exporters
+    ├── mutation_engine.py     # Structured API payload mutation generation
     ├── report.py               # console + HTML report generation (CVSS/PoC columns, attack-surface table)
     └── checks/
         ├── auth.py                     # API2 Broken Authentication
@@ -326,18 +521,23 @@ api_security_scanner/
         ├── api_inventory.py            # API9 Improper Inventory Management (+ robots.txt/sitemap.xml discovery)
         ├── graphql.py                  # GraphQL introspection / sensitive mutation discovery
         ├── business_logic.py           # Multi-step workflow chaining / step-skip & reorder bypass detection
+        ├── fuzzing.py                  # Mutation-based payload fuzzing
         └── unsafe_consumption.py       # API10 heuristic upstream-consumption safety checks
 ```
 
 ## Extending it
 
 Each check is a standalone module with a `run(client, endpoints, ...) ->
-list[Finding]` function, registered in `ALL_CHECKS` in `main.py`. To add a
+list[Finding]` function, registered in the built-in check registry in `main.py`.
+To add a
 new check:
 
 1. Create `scanner/checks/your_check.py` with a `run()` function that
    returns a list of `Finding` objects (see `scanner/models.py`).
-2. Import it in `main.py` and add it to `ALL_CHECKS`.
+2. Import it in `main.py` and add it to `ALL_BUILTIN_CHECKS`.
+
+Or use the plugin system: create `plugins/your_plugin/plugin.yaml` +
+`plugins/your_plugin/plugin.py` without modifying scanner core files.
 
 Ideas for extensions: GraphQL introspection abuse checks, OAuth scope
 over-permission checks, or response-time-based user enumeration detection.
@@ -356,6 +556,6 @@ over-permission checks, or response-time-based user enumeration detection.
 - Advanced exploit frameworks (full SQLi extraction, full gadget-chain
   generation, full JWT brute-force cracking) are outside scope of this
   scanner and are best handled by specialized tools.
-- Browser-side JavaScript execution paths are partially covered through
-  script scraping, but this is still not equivalent to a full authenticated
-  dynamic browser crawler with user-journey replay.
+- Browser-side coverage is improved via optional Playwright discovery mode,
+  but still depends on manual user interaction and is not yet a fully
+  autonomous crawler that can infer every authenticated journey.

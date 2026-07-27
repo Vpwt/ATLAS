@@ -1,10 +1,14 @@
-"""Thin wrapper around requests that adds timeouts, logging, and safety rails."""
+"""Thin wrapper around httpx that adds timeouts, logging, and safety rails."""
+from __future__ import annotations
+
+import asyncio
 import json
 import shlex
 import time
 from urllib.parse import urlencode
-import requests
 from typing import Any, Callable, Optional
+
+import httpx
 
 
 def build_curl(method: str, url: str, headers: Optional[dict] = None,
@@ -36,7 +40,10 @@ def build_curl(method: str, url: str, headers: Optional[dict] = None,
 class ApiClient:
     def __init__(self, base_url: str, default_headers: Optional[dict] = None,
                  timeout: float = 10.0, verify_tls: bool = True, request_delay: float = 0.0,
-                 auth_provider: Optional[Callable[[], str]] = None):
+                 auth_provider: Optional[Callable[[], str]] = None,
+                 session_cookie: str = "",
+                 signer: Optional[Callable[..., dict]] = None,
+                 client_cert: Optional[object] = None):
         self.base_url = base_url.rstrip("/")
         self.default_headers = default_headers or {}
         self.timeout = timeout
@@ -46,12 +53,20 @@ class ApiClient:
         # (or as a refreshed version of) default_headers["Authorization"] - lets a
         # long scan re-login/refresh a short-lived access token mid-run.
         self.auth_provider = auth_provider
+        self.session_cookie = session_cookie
+        self.signer = signer
         self.request_count = 0
+        self._client = httpx.Client(
+            timeout=self.timeout,
+            verify=self.verify_tls,
+            follow_redirects=False,
+            cert=client_cert,
+        )
 
     def request(self, method: str, path: str, headers: Optional[dict] = None,
                 params: Optional[dict] = None, json_body: Optional[dict] = None,
                 auth_override: Optional[str] = "keep",
-                body_content_type: str = "application/json") -> requests.Response:
+            body_content_type: str = "application/json") -> httpx.Response:
         """
         auth_override:
           "keep"  -> use default_headers as-is (includes auth if configured)
@@ -67,6 +82,9 @@ class ApiClient:
                 pass
         if headers:
             merged_headers.update(headers)
+
+        if self.session_cookie and "Cookie" not in merged_headers and "cookie" not in merged_headers:
+            merged_headers["Cookie"] = self.session_cookie
 
         if auth_override == "strip":
             merged_headers.pop("Authorization", None)
@@ -104,10 +122,107 @@ class ApiClient:
                     request_kwargs["data"] = json.dumps(json_body)
                 request_kwargs["headers"].setdefault("Content-Type", body_content_type)
 
-        resp = requests.request(
-            **request_kwargs,
-        )
+        if self.signer:
+            try:
+                sign_headers = self.signer(method.upper(), url, dict(merged_headers), json_body, params)
+                if sign_headers:
+                    request_kwargs["headers"].update(sign_headers)
+                    merged_headers.update(sign_headers)
+            except Exception:
+                pass
+
+        resp = self._client.request(**request_kwargs)
         # Attach a ready-to-run curl reproduction to every response so check
         # modules can optionally surface it as PoC evidence on a Finding.
         resp.curl_repro = build_curl(method, url, merged_headers, params, json_body, body_content_type)
         return resp
+
+    def close(self):
+        self._client.close()
+
+
+class AsyncApiClient:
+    def __init__(self, base_url: str, default_headers: Optional[dict] = None,
+                 timeout: float = 10.0, verify_tls: bool = True, request_delay: float = 0.0,
+                 auth_provider: Optional[Callable[[], str]] = None,
+                 session_cookie: str = "",
+                 signer: Optional[Callable[..., dict]] = None,
+                 client_cert: Optional[object] = None):
+        self.base_url = base_url.rstrip("/")
+        self.default_headers = default_headers or {}
+        self.timeout = timeout
+        self.verify_tls = verify_tls
+        self.request_delay = request_delay
+        self.auth_provider = auth_provider
+        self.session_cookie = session_cookie
+        self.signer = signer
+        self.request_count = 0
+        self._client = httpx.AsyncClient(
+            timeout=self.timeout,
+            verify=self.verify_tls,
+            follow_redirects=False,
+            cert=client_cert,
+        )
+
+    async def request(self, method: str, path: str, headers: Optional[dict] = None,
+                      params: Optional[dict] = None, json_body: Optional[dict] = None,
+                      auth_override: Optional[str] = "keep",
+                      body_content_type: str = "application/json") -> httpx.Response:
+        url = f"{self.base_url}{path}"
+        merged_headers = dict(self.default_headers)
+        if self.auth_provider and auth_override == "keep":
+            try:
+                merged_headers["Authorization"] = self.auth_provider()
+            except Exception:
+                pass
+        if headers:
+            merged_headers.update(headers)
+
+        if self.session_cookie and "Cookie" not in merged_headers and "cookie" not in merged_headers:
+            merged_headers["Cookie"] = self.session_cookie
+
+        if auth_override == "strip":
+            merged_headers.pop("Authorization", None)
+            merged_headers.pop("authorization", None)
+        elif auth_override is None:
+            merged_headers = {}
+
+        if self.request_delay:
+            await asyncio.sleep(self.request_delay)
+
+        self.request_count += 1
+        request_kwargs: dict[str, Any] = {
+            "method": method.upper(),
+            "url": url,
+            "headers": merged_headers,
+            "params": params,
+        }
+
+        ctype = (body_content_type or "application/json").lower()
+        if json_body is not None:
+            if ctype == "application/x-www-form-urlencoded":
+                request_kwargs["data"] = json_body
+                request_kwargs["headers"].setdefault("Content-Type", "application/x-www-form-urlencoded")
+            elif ctype == "multipart/form-data":
+                request_kwargs["files"] = {k: (None, str(v)) for k, v in (json_body or {}).items()}
+            elif ctype == "application/json" or ctype.endswith("+json"):
+                request_kwargs["json"] = json_body
+            else:
+                request_kwargs["content"] = json_body if isinstance(json_body, str) else json.dumps(json_body)
+                request_kwargs["headers"].setdefault("Content-Type", body_content_type)
+
+        if self.signer:
+            try:
+                sign_headers = self.signer(method.upper(), url, dict(merged_headers), json_body, params)
+                if sign_headers:
+                    request_kwargs["headers"].update(sign_headers)
+                    merged_headers.update(sign_headers)
+            except Exception:
+                pass
+
+        resp = await self._client.request(**request_kwargs)
+        resp.curl_repro = build_curl(method, url, merged_headers, params, json_body, body_content_type)
+        return resp
+
+    async def close(self):
+        await self._client.aclose()

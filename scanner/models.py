@@ -80,6 +80,9 @@ class Finding:
     evidence: str = ""       # short snippet of evidence (status code, header, response fragment)
     owasp_ref: str = ""      # e.g. "API1:2023 Broken Object Level Authorization"
     curl_repro: str = ""    # optional curl command to reproduce the request that triggered this
+    cwe: str = ""           # optional CWE mapping (e.g. CWE-639)
+    remediation: str = ""   # optional remediation guidance
+    exploit_hint: str = ""  # optional next probe suggestion for testers
 
     @property
     def cvss_score(self) -> float:
